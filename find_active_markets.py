@@ -7,10 +7,13 @@ from cryptography.hazmat.primitives.asymmetric import padding
 import base64
 
 # Simple config
-ENV = "prod"
-KEY_ID = "95a3d02c-3ab8-4227-aa9a-125636bb5068"
-with open("kalshi_priv.pem", "rb") as f:
-    PRIVATE_KEY = serialization.load_pem_private_key(f.read(), password=None)
+ENV = os.getenv("KALSHI_ENV", "prod")
+KEY_ID = os.getenv("KALSHI_KEY_ID", "")
+try:
+    with open(os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_priv.pem"), "rb") as f:
+        PRIVATE_KEY = serialization.load_pem_private_key(f.read(), password=None)
+except Exception:
+    PRIVATE_KEY = None
 
 REST_BASE = "https://api.elections.kalshi.com"
 
