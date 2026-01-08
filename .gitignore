@@ -19,3 +19,5 @@ env/
 # IDE
 .vscode/
 .idea/
+logs/
+*.db-*
