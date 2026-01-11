@@ -28,8 +28,8 @@ class AlertManager:
             self.alerts_sent_today += 1
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list):
-        # Rule: Only score >= 85
-        if score < 85:
+        # Rule: TEMPORARY TEST - ALLOW ALL SCORES
+        if score < 1:
             return
 
         now = time.time()

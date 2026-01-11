@@ -292,10 +292,10 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                         
                         score_result = score_trade(volume_proxy, snap, None)
                         
-                        if score_result["score"] >= 60:
+                        if score_result["score"] >= 1:
                              logger.info(f"⚠️ HIGH SCORE {score_result['score']} | {trade.market_ticker} | {score_result['reasons']}")
                              
-                             # 1. Attempt Solo Alert (Require Score >= 85)
+                             # 1. Attempt Solo Alert (TEMPORARY TEST: Score >= 1)
                              alert_manager.process_solo_alert(
                                  trade.market_ticker,
                                  score_result["score"],
