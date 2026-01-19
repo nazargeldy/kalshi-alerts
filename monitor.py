@@ -205,12 +205,12 @@ async def heartbeat(store: TradeStore, interval_sec: int = 60):
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
 
-async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore) -> None:
+async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str]) -> None:
     ws_headers = make_headers(private_key, "GET", WS_SIGN_PATH)
     baselines = MarketBaselines()
     clusters = MarketClusterTracker(window_seconds=300)
     alerter = Alerter()
-    alert_manager = AlertManager(alerter, daily_cap=20)
+    alert_manager = AlertManager(alerter, daily_cap=20, ticker_map=ticker_map)
     
     # Startup Alert
     start_msg = "✅ Kalshi monitor is live."
@@ -292,10 +292,21 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                         
                         score_result = score_trade(volume_proxy, snap, None)
                         
-                        if score_result["score"] >= 1:
+                        # DEBUG: Process every trade (internally throttled if ALERT_MODE=debug)
+                        alert_manager.process_debug_trade(
+                            ticker=trade.market_ticker,
+                            yes_price=trade.yes_price,
+                            contracts=trade.count,
+                            volume_proxy=volume_proxy,
+                            score=score_result["score"],
+                            reasons=score_result["reasons"],
+                            ts_str=ts_str
+                        )
+                        
+                        if score_result["score"] >= 60:
                              logger.info(f"⚠️ HIGH SCORE {score_result['score']} | {trade.market_ticker} | {score_result['reasons']}")
                              
-                             # 1. Attempt Solo Alert (TEMPORARY TEST: Score >= 1)
+                             # 1. Attempt Solo Alert (Requires Production Thresholds)
                              alert_manager.process_solo_alert(
                                  trade.market_ticker,
                                  score_result["score"],
@@ -361,11 +372,23 @@ def main():
 
     tickers = tickers[:SUBSCRIBE_TICKER_LIMIT]
     logger.info(f"Selected {len(tickers)} tickers for monitoring.")
+    
+    # Build title map for human readable alerts
+    # Map {ticker: "Title"}
+    ticker_map = {}
+    for m in markets:
+        t = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
+        title = m.get("title") or m.get("name")
+        if t and title:
+            # Maybe include subtitle if present?
+            # sub = m.get("subtitle")
+            # if sub: title = f"{title} ({sub})"
+            ticker_map[t] = title
 
     store = TradeStore(db_path="kalshi_trades.db", env=ENV)
 
     try:
-        asyncio.run(ws_listen_trades(private_key, tickers, store))
+        asyncio.run(ws_listen_trades(private_key, tickers, store, ticker_map))
     except KeyboardInterrupt:
         logger.info("Shutdown requested (SIGINT).")
     except Exception as e:
