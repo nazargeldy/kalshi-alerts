@@ -91,7 +91,7 @@ class AlertManager:
         market_lines = []
         for t in markets:
             title = self.ticker_map.get(t, t)
-            market_lines.append(f"- {title}")
+            market_lines.append(f"- <a href='https://kalshi.com/markets/{t}'>{title}</a>")
 
         msg = (
             f"🔥 <b>CLUSTER {cluster_key} ({tier_label})</b>\n"
@@ -125,9 +125,10 @@ class AlertManager:
 
         if is_sample or is_large:
             title = self.ticker_map.get(ticker, ticker)
+            link = f"https://kalshi.com/markets/{ticker}"
             msg = (
                 f"🧪 <b>TRADE (debug)</b>\n"
-                f"{title}\n"
+                f"<a href='{link}'>{title}</a>\n"
                 f"YES: {yes_price}¢ ({yes_price/100:.2f})\n"
                 f"Contracts: {contracts}\n"
                 f"ProxyV: {volume_proxy:.0f}\n"
