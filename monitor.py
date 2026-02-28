@@ -309,13 +309,17 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
         try:
             # Generate FRESH auth headers on every connection attempt
             ws_headers = make_headers(private_key, "GET", WS_SIGN_PATH)
-            async with websockets.connect(
-                WS_URL,
-                additional_headers=ws_headers,
-                ping_interval=20,
-                ping_timeout=20,
-                max_queue=1000,
-            ) as ws:
+            # websockets <14 uses extra_headers, >=14 uses additional_headers
+            ws_ver = tuple(int(x) for x in websockets.__version__.split(".")[:2])
+            hdr_kwarg = "additional_headers" if ws_ver >= (14, 0) else "extra_headers"
+            connect_kwargs = {
+                hdr_kwarg: ws_headers,
+                "ping_interval": 20,
+                "ping_timeout": 20,
+            }
+            if ws_ver >= (14, 0):
+                connect_kwargs["max_queue"] = 1000
+            async with websockets.connect(WS_URL, **connect_kwargs) as ws:
                 shared_state["ws"] = ws
                 logger.info(f"Connected WS: {WS_URL}")
                 current_tickers = shared_state["tickers"]
