@@ -206,7 +206,6 @@ async def heartbeat(store: TradeStore, interval_sec: int = 60):
             logger.error(f"Heartbeat error: {e}")
 
 async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str]) -> None:
-    ws_headers = make_headers(private_key, "GET", WS_SIGN_PATH)
     baselines = MarketBaselines()
     clusters = MarketClusterTracker(window_seconds=300)
     alerter = Alerter()
@@ -226,6 +225,8 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
 
     while True:
         try:
+            # Generate FRESH auth headers on every connection attempt
+            ws_headers = make_headers(private_key, "GET", WS_SIGN_PATH)
             async with websockets.connect(
                 WS_URL,
                 additional_headers=ws_headers,
