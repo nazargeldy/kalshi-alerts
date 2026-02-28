@@ -1,0 +1,27 @@
+[Unit]
+Description=Kalshi Unusual Flow Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kalshi_alerts
+ExecStart=/home/ubuntu/kalshi_alerts/.venv/bin/python monitor.py
+Restart=always
+RestartSec=10
+Environment=PYTHONIOENCODING=utf-8
+EnvironmentFile=/home/ubuntu/kalshi_alerts/.env
+
+# Logging (stdout/stderr go to journald)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kalshi-monitor
+
+# Safety
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/kalshi_alerts
+
+[Install]
+WantedBy=multi-user.target
