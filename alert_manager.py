@@ -1,3 +1,4 @@
+import datetime
 import os
 import time
 from collections import defaultdict
@@ -8,6 +9,7 @@ class AlertManager:
         self.daily_cap = daily_cap
         self.ticker_map = ticker_map or {}
         self.alerts_sent_today = 0
+        self._cap_date = datetime.date.today()
         
         # Cooldown tracking
         self.market_last_alert = defaultdict(float) # ticker -> timestamp
@@ -28,7 +30,15 @@ class AlertManager:
         self.debug_sent_last_min = 0
         self.debug_window_start = 0
 
+    def _maybe_reset_daily_cap(self):
+        """Reset the daily alert counter at midnight."""
+        today = datetime.date.today()
+        if today != self._cap_date:
+            self._cap_date = today
+            self.alerts_sent_today = 0
+
     def can_send(self) -> bool:
+        self._maybe_reset_daily_cap()
         return self.alerts_sent_today < self.daily_cap
 
     def _send_internal(self, msg: str):

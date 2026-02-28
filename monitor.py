@@ -193,17 +193,76 @@ def parse_trade_message(msg: Dict[str, Any]) -> Optional[TradePrint]:
     return TradePrint(ticker, yes_price, no_price, count, ts)
 
 
-async def heartbeat(store: TradeStore, interval_sec: int = 60):
+async def heartbeat(store: TradeStore, alert_manager, interval_sec: int = 60):
     """Logs a health summary every minute."""
     logger.info("Heartbeat task started.")
     while True:
         try:
             await asyncio.sleep(interval_sec)
-            logger.info("❤️ HEARTBEAT: Monitor is running. DB active.")
+            logger.info(
+                f"❤️ HEARTBEAT | alerts_today={alert_manager.alerts_sent_today}/{alert_manager.daily_cap} "
+                f"| mode={alert_manager.alert_mode}"
+            )
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
+
+async def refresh_markets_periodically(private_key, state: dict, interval_hours: float = 6.0):
+    """Re-fetch open markets every N hours, updating tickers + ticker_map."""
+    interval_sec = interval_hours * 3600
+    logger.info(f"Market-refresh task started (every {interval_hours}h).")
+    while True:
+        try:
+            await asyncio.sleep(interval_sec)
+            logger.info("🔄 Refreshing open markets...")
+            markets = await asyncio.get_event_loop().run_in_executor(
+                None, fetch_open_markets, private_key
+            )
+            markets.sort(key=lambda m: int(m.get("volume") or 0), reverse=True)
+            new_tickers = pick_us_politics_tickers(markets)[:SUBSCRIBE_TICKER_LIMIT]
+            
+            new_map = {}
+            for m in markets:
+                t = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
+                title = m.get("title") or m.get("name")
+                if t and title:
+                    new_map[t] = title
+            
+            added = set(new_tickers) - set(state["tickers"])
+            removed = set(state["tickers"]) - set(new_tickers)
+            
+            state["tickers"] = new_tickers
+            state["ticker_map"].update(new_map)
+            # Also update alert_manager's map reference
+            state["alert_manager"].ticker_map = state["ticker_map"]
+            
+            logger.info(f"🔄 Market refresh done: {len(new_tickers)} tickers (+{len(added)} new, -{len(removed)} dropped)")
+            if added:
+                logger.info(f"   New tickers: {list(added)[:10]}")
+            
+            # If we have a WS reference, resubscribe
+            ws = state.get("ws")
+            if ws and not ws.closed and (added or removed):
+                try:
+                    sub = {
+                        "id": state.get("msg_id", 999),
+                        "cmd": "subscribe",
+                        "params": {
+                            "channels": ["trade"],
+                            "market_tickers": new_tickers,
+                        }
+                    }
+                    await ws.send(json.dumps(sub))
+                    logger.info("🔄 Re-subscribed to updated ticker list.")
+                except Exception as e:
+                    logger.warning(f"Failed to re-subscribe after refresh: {e}")
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Market refresh error: {e}")
+
 
 async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str]) -> None:
     baselines = MarketBaselines()
@@ -211,13 +270,24 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
     alerter = Alerter()
     alert_manager = AlertManager(alerter, daily_cap=20, ticker_map=ticker_map)
     
+    # Shared state for the refresh task
+    shared_state = {
+        "tickers": list(market_tickers),
+        "ticker_map": ticker_map,
+        "alert_manager": alert_manager,
+        "ws": None,
+        "msg_id": 1,
+    }
+    
     # Startup Alert
     start_msg = "✅ Kalshi monitor is live."
     logger.info(start_msg)
     alerter.send(start_msg)
 
     # Start Heartbeat
-    asyncio.create_task(heartbeat(store))
+    asyncio.create_task(heartbeat(store, alert_manager))
+    # Start periodic market refresh (every 6 hours)
+    asyncio.create_task(refresh_markets_periodically(private_key, shared_state))
 
     backoff = 1
     msg_id = 1
@@ -234,18 +304,21 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                 ping_timeout=20,
                 max_queue=1000,
             ) as ws:
+                shared_state["ws"] = ws
                 logger.info(f"Connected WS: {WS_URL}")
-                logger.info(f"Subscribing to {len(market_tickers)} tickers...")
+                current_tickers = shared_state["tickers"]
+                logger.info(f"Subscribing to {len(current_tickers)} tickers...")
 
                 sub = {
                     "id": msg_id,
                     "cmd": "subscribe",
                     "params": {
                         "channels": ["trade"],
-                        "market_tickers": market_tickers,
+                        "market_tickers": current_tickers,
                     }
                 }
                 msg_id += 1
+                shared_state["msg_id"] = msg_id
                 await ws.send(json.dumps(sub))
                 backoff = 1  # reset
 
@@ -339,8 +412,12 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                         pass # Ignore heartbeat checks or other msgs
 
         except Exception as e:
+            shared_state["ws"] = None
             logger.error(f"WS disconnected/error: {e!r}")
-            logger.info(f"Reconnecting in {backoff}s...")
+            logger.warning(f"Reconnecting in {backoff}s...")
+            # Notify on Telegram if this is the first disconnect (backoff==1 means fresh disconnect)
+            if backoff <= 2:
+                alerter.send(f"⚠️ WS disconnected: {type(e).__name__}. Reconnecting...")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
@@ -396,8 +473,11 @@ def main():
         logger.critical(f"Fatal error in main loop: {e!r}")
     finally:
         logger.info("Closing database...")
-        store.commit()
-        store.close()
+        try:
+            store.commit()
+            store.close()
+        except Exception:
+            pass
         logger.info("Goodbye.")
 
 
