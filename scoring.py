@@ -102,11 +102,11 @@ def score_trade(
     if yes_price_cents <= 15 or yes_price_cents >= 85:
         score += 15
         side = "YES" if yes_price_cents <= 15 else "NO"
-        reasons.append(f"conviction={side}@{yes_price_cents}¢")
+        reasons.append(f"Most likely: {side} (price {yes_price_cents}¢)")
     elif yes_price_cents <= 25 or yes_price_cents >= 75:
         score += 8
         side = "YES" if yes_price_cents <= 50 else "NO"
-        reasons.append(f"conviction={side}@{yes_price_cents}¢")
+        reasons.append(f"Most likely: {side} (price {yes_price_cents}¢)")
 
     return {
         "score": min(score, 100),
