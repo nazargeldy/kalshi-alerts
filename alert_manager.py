@@ -51,8 +51,8 @@ class AlertManager:
             self.alerts_sent_today += 1
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list):
-        # Production Rule: Score >= 85
-        if score < 85:
+        # Production Rule: Score >= 60
+        if score < 60:
             return
 
         now = time.time()
