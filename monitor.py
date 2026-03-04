@@ -411,7 +411,9 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                              alert_manager.process_solo_alert(
                                  trade.market_ticker,
                                  score_result["score"],
-                                 score_result["reasons"]
+                                 score_result["reasons"],
+                                 yes_price=trade.yes_price,
+                                 contracts=trade.count
                              )
                              
                              # 2. Update Clusters

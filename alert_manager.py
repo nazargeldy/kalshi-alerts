@@ -50,7 +50,7 @@ class AlertManager:
         if success:
             self.alerts_sent_today += 1
 
-    def process_solo_alert(self, ticker: str, score: float, reasons: list):
+    def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
         # Production Rule: Score >= 60
         if score < 60:
             return
@@ -61,10 +61,26 @@ class AlertManager:
             return
 
         title = self.ticker_map.get(ticker, ticker)
+        no_price = 100 - yes_price
+        link = f"https://kalshi.com/markets/{ticker}"
+
+        reason_lines = ""
+        for r in reasons:
+            reason_lines += f"  • {r}\n"
+
         msg = (
-            f"🚨 <b>SOLO EXTREME {score}</b>\n"
-            f"<a href='https://kalshi.com/markets/{ticker}'>{title}</a>\n"
-            f"Reasons: {', '.join(reasons)}"
+            f"🚨 <b>Unusual Activity Detected</b>\n"
+            f"\n"
+            f"📊 <b>{title}</b>\n"
+            f"\n"
+            f"1. YES — {yes_price}%\n"
+            f"2. NO  — {no_price}%\n"
+            f"\n"
+            f"💰 {contracts:,} contracts\n"
+            f"⚡ Score: {score}/100\n"
+            f"{reason_lines}"
+            f"\n"
+            f"🔗 <a href='{link}'>Trade on Kalshi</a>"
         )
         print(f"🚨 SOLO ALERT SENT for {ticker}")
         self._send_internal(msg)
@@ -86,18 +102,21 @@ class AlertManager:
         if now - self.cluster_last_alert[cluster_key] < self.CLUSTER_COOLDOWN:
             return
 
-        tier_label = "TIER 1" if is_tier_1 else "TIER 2"
+        tier_label = "HIGH" if is_tier_1 else "MODERATE"
         
-        market_lines = []
-        for t in markets:
+        market_lines = ""
+        for i, t in enumerate(markets, 1):
             title = self.ticker_map.get(t, t)
-            market_lines.append(f"- <a href='https://kalshi.com/markets/{t}'>{title}</a>")
+            market_lines += f"{i}. <a href='https://kalshi.com/markets/{t}'>{title}</a>\n"
 
         msg = (
-            f"🔥 <b>CLUSTER {cluster_key} ({tier_label})</b>\n"
-            f"Count: {count} mkts\n"
-            f"Max Score: {max_score}\n"
-            f"Tickers:\n{chr(10).join(market_lines)}"
+            f"🔥 <b>Correlated Activity — {tier_label}</b>\n"
+            f"\n"
+            f"📊 {count} related markets moving together:\n"
+            f"\n"
+            f"{market_lines}"
+            f"\n"
+            f"⚡ Max Score: {max_score}/100"
         )
         print(f"🔥 CLUSTER ALERT SENT for {cluster_key}")
         self._send_internal(msg)
@@ -126,14 +145,24 @@ class AlertManager:
         if is_sample or is_large:
             title = self.ticker_map.get(ticker, ticker)
             link = f"https://kalshi.com/markets/{ticker}"
+            no_price = 100 - yes_price
+
+            reason_lines = ""
+            for r in reasons:
+                reason_lines += f"  • {r}\n"
+
             msg = (
-                f"🧪 <b>TRADE (debug)</b>\n"
-                f"<a href='{link}'>{title}</a>\n"
-                f"YES: {yes_price}¢ ({yes_price/100:.2f})\n"
-                f"Contracts: {contracts}\n"
-                f"ProxyV: {volume_proxy:.0f}\n"
-                f"Score: {score} | {', '.join(reasons)}\n"
-                f"Time: {ts_str}"
+                f"📊 <b>{title}</b>\n"
+                f"\n"
+                f"1. YES — {yes_price}%\n"
+                f"2. NO  — {no_price}%\n"
+                f"\n"
+                f"💰 {contracts:,} contracts\n"
+                f"⚡ Score: {score}/100\n"
+                f"{reason_lines}"
+                f"\n"
+                f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
+                f"🕐 {ts_str}"
             )
             print(f"🧪 DEBUG ALERT SENT for {ticker}")
             
