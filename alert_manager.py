@@ -4,11 +4,12 @@ import time
 from collections import defaultdict
 
 class AlertManager:
-    def __init__(self, alerter, daily_cap=20, ticker_map=None, link_map=None):
+    def __init__(self, alerter, daily_cap=20, ticker_map=None, link_map=None, option_labels_map=None):
         self.alerter = alerter
         self.daily_cap = daily_cap
         self.ticker_map = ticker_map or {}
         self.link_map = link_map or {}
+        self.option_labels_map = option_labels_map or {}  # {ticker: (yes_label, no_label)}
         self.alerts_sent_today = 0
         self._cap_date = datetime.date.today()
         
@@ -64,6 +65,7 @@ class AlertManager:
         title = self.ticker_map.get(ticker, ticker)
         no_price = 100 - yes_price
         link = self.link_map.get(ticker, f"https://kalshi.com/browse")
+        yes_label, no_label = self.option_labels_map.get(ticker, ("YES", "NO"))
 
         reason_lines = ""
         for r in reasons:
@@ -74,8 +76,8 @@ class AlertManager:
             f"\n"
             f"📊 <b>{title}</b>\n"
             f"\n"
-            f"1. YES — {yes_price}%\n"
-            f"2. NO  — {no_price}%\n"
+            f"1. {yes_label} — {yes_price}%\n"
+            f"2. {no_label} — {no_price}%\n"
             f"\n"
             f"💰 {contracts:,} contracts\n"
             f"⚡ Score: {score}/100\n"
@@ -148,6 +150,7 @@ class AlertManager:
             title = self.ticker_map.get(ticker, ticker)
             link = self.link_map.get(ticker, "https://kalshi.com/browse")
             no_price = 100 - yes_price
+            yes_label, no_label = self.option_labels_map.get(ticker, ("YES", "NO"))
 
             reason_lines = ""
             for r in reasons:
@@ -156,8 +159,8 @@ class AlertManager:
             msg = (
                 f"📊 <b>{title}</b>\n"
                 f"\n"
-                f"1. YES — {yes_price}%\n"
-                f"2. NO  — {no_price}%\n"
+                f"1. {yes_label} — {yes_price}%\n"
+                f"2. {no_label} — {no_price}%\n"
                 f"\n"
                 f"💰 {contracts:,} contracts\n"
                 f"⚡ Score: {score}/100\n"

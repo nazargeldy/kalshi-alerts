@@ -144,6 +144,23 @@ def _build_market_title(market: dict) -> str:
         return _clean_parlay_title(raw_title)
     return raw_title
 
+
+def _build_option_labels(market: dict) -> tuple:
+    """Return (yes_label, no_label) for display in alerts.
+    For regular markets: uses yes_sub_title (e.g. 'Ken Paxton', 'Boston').
+    For parlays: 'Parlay hits' / 'Parlay misses'.
+    """
+    ticker = market.get("ticker", "")
+
+    if _is_mve_market(ticker):
+        return ("Parlay hits ✅", "Parlay misses ❌")
+
+    # Regular market — use yes_sub_title as the YES-side name
+    sub = (market.get("yes_sub_title") or "").strip()
+    if sub:
+        return (sub, f"Not {sub}")
+    return ("YES", "NO")
+
 if ENV == "demo":
     REST_BASE = "https://demo-api.kalshi.co"
     WS_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
@@ -302,6 +319,7 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
             
             new_map = {}
             new_link_map = {}
+            new_option_labels = {}
             new_close_times = {}
             for m in markets:
                 t = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
@@ -311,6 +329,7 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
                 if title:
                     new_map[t] = title
                 new_link_map[t] = _build_market_link(m)
+                new_option_labels[t] = _build_option_labels(m)
                 ct_str = m.get("close_time") or m.get("expiration_time") or m.get("expected_expiration_time")
                 if ct_str:
                     try:
@@ -326,9 +345,11 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
             state["ticker_map"].update(new_map)
             state["close_time_map"].update(new_close_times)
             state["link_map"].update(new_link_map)
+            state["option_labels_map"].update(new_option_labels)
             # Also update alert_manager's map references
             state["alert_manager"].ticker_map = state["ticker_map"]
             state["alert_manager"].link_map = state["link_map"]
+            state["alert_manager"].option_labels_map = state["option_labels_map"]
             
             logger.info(f"🔄 Market refresh done: {len(new_tickers)} tickers (+{len(added)} new, -{len(removed)} dropped)")
             if added:
@@ -357,11 +378,11 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
             logger.error(f"Market refresh error: {e}")
 
 
-async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str], close_time_map: Dict[str, Any] = None, link_map: Dict[str, str] = None) -> None:
+async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str], close_time_map: Dict[str, Any] = None, link_map: Dict[str, str] = None, option_labels_map: Dict[str, tuple] = None) -> None:
     baselines = MarketBaselines()
     clusters = MarketClusterTracker(window_seconds=300)
     alerter = Alerter()
-    alert_manager = AlertManager(alerter, daily_cap=20, ticker_map=ticker_map, link_map=link_map)
+    alert_manager = AlertManager(alerter, daily_cap=20, ticker_map=ticker_map, link_map=link_map, option_labels_map=option_labels_map)
     close_time_map = close_time_map or {}
     
     # Shared state for the refresh task
@@ -370,6 +391,7 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
         "ticker_map": ticker_map,
         "close_time_map": close_time_map,
         "link_map": link_map or {},
+        "option_labels_map": option_labels_map or {},
         "alert_manager": alert_manager,
         "ws": None,
         "msg_id": 1,
@@ -564,10 +586,11 @@ def main():
     tickers = tickers[:SUBSCRIBE_TICKER_LIMIT]
     logger.info(f"Selected {len(tickers)} tickers for monitoring.")
     
-    # Build title map, link map and close_time map for human readable alerts + scoring
-    ticker_map = {}     # {ticker: "Clean Title"}
-    link_map = {}       # {ticker: "https://kalshi.com/markets/..."}
-    close_time_map = {} # {ticker: datetime or None}
+    # Build title map, link map, option labels and close_time map
+    ticker_map = {}         # {ticker: "Clean Title"}
+    link_map = {}           # {ticker: "https://kalshi.com/markets/..."}
+    option_labels_map = {}  # {ticker: ("yes_label", "no_label")}
+    close_time_map = {}     # {ticker: datetime or None}
     for m in markets:
         t = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
         if not t:
@@ -578,6 +601,8 @@ def main():
             ticker_map[t] = title
         # Working URL
         link_map[t] = _build_market_link(m)
+        # Option labels (e.g. "Ken Paxton" / "Not Ken Paxton")
+        option_labels_map[t] = _build_option_labels(m)
         # Parse close_time / expiration_time from REST
         ct_str = m.get("close_time") or m.get("expiration_time") or m.get("expected_expiration_time")
         if ct_str:
@@ -591,7 +616,7 @@ def main():
     store = TradeStore(db_path="kalshi_trades.db", env=ENV)
 
     try:
-        asyncio.run(ws_listen_trades(private_key, tickers, store, ticker_map, close_time_map, link_map))
+        asyncio.run(ws_listen_trades(private_key, tickers, store, ticker_map, close_time_map, link_map, option_labels_map))
     except KeyboardInterrupt:
         logger.info("Shutdown requested (SIGINT).")
     except Exception as e:
