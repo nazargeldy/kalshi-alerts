@@ -148,12 +148,27 @@ def _build_market_title(market: dict) -> str:
 def _build_option_labels(market: dict) -> tuple:
     """Return (yes_label, no_label) for display in alerts.
     For regular markets: uses yes_sub_title (e.g. 'Ken Paxton', 'Boston').
-    For parlays: 'Parlay hits' / 'Parlay misses'.
+    For parlays: shows the cleaned leg names.
     """
     ticker = market.get("ticker", "")
 
     if _is_mve_market(ticker):
-        return ("Parlay hits ✅", "Parlay misses ❌")
+        raw_title = market.get("title") or ""
+        legs = [l.strip() for l in raw_title.split(",") if l.strip()]
+        clean_legs = []
+        for leg in legs:
+            for prefix in ("yes ", "no "):
+                if leg.lower().startswith(prefix):
+                    leg = leg[len(prefix):]
+                    break
+            clean_legs.append(leg)
+        if clean_legs:
+            shown = clean_legs[:3]
+            yes_label = " + ".join(shown)
+            if len(clean_legs) > 3:
+                yes_label += f" (+{len(clean_legs) - 3})"
+            return (f"✅ {yes_label}", f"❌ Not all hit")
+        return ("✅ All legs hit", "❌ Not all hit")
 
     # Regular market — use yes_sub_title as the YES-side name
     sub = (market.get("yes_sub_title") or "").strip()
