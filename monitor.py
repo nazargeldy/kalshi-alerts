@@ -66,6 +66,84 @@ US_POLITICS_KEYWORDS = [
     "yes", "no", "nba", "nfl", "points", "wins"
 ]
 
+
+# =========================
+# Title & URL helpers
+# =========================
+
+def _base_event_ticker(event_ticker: str) -> str:
+    """Extract the base event ticker (before the first dash+digit/hash suffix).
+    E.g. 'KXATPMATCH-26MAR04BERSTR' → 'KXATPMATCH'
+         'KXSENATETXR-26'            → 'KXSENATETXR'
+    """
+    parts = event_ticker.split("-")
+    return parts[0] if parts else event_ticker
+
+
+def _build_kalshi_url(event_ticker: str) -> str:
+    """Build a working Kalshi web URL from a base event ticker."""
+    base = _base_event_ticker(event_ticker)
+    return f"https://kalshi.com/markets/{base.lower()}"
+
+
+def _is_mve_market(ticker: str) -> bool:
+    """Check if this is a multi-variable event (parlay/combo) market."""
+    return "KXMVE" in (ticker or "").upper()
+
+
+def _clean_parlay_title(raw_title: str, max_legs: int = 3) -> str:
+    """Turn 'yes Struff,yes Brooksby,yes Cristian' into '3-Leg Parlay: Struff, Brooksby, Cristian'."""
+    legs = [l.strip() for l in raw_title.split(",") if l.strip()]
+    clean_legs = []
+    for leg in legs:
+        # Remove 'yes '/'no ' prefix
+        for prefix in ("yes ", "no "):
+            if leg.lower().startswith(prefix):
+                leg = leg[len(prefix):]
+                break
+        clean_legs.append(leg)
+
+    total = len(clean_legs)
+    if total == 0:
+        return raw_title
+
+    shown = clean_legs[:max_legs]
+    label = f"🎲 {total}-Leg Parlay: " + ", ".join(shown)
+    if total > max_legs:
+        label += f" +{total - max_legs} more"
+    return label
+
+
+def _build_market_link(market: dict) -> str:
+    """Return the best working Kalshi URL for this market dict."""
+    ticker = market.get("ticker", "")
+
+    if _is_mve_market(ticker):
+        # For parlays, link to the first leg's base event
+        legs = market.get("mve_selected_legs") or []
+        if legs and isinstance(legs, list):
+            first_leg_et = legs[0].get("event_ticker", "")
+            if first_leg_et:
+                return _build_kalshi_url(first_leg_et)
+        # Fallback: just link to browse
+        return "https://kalshi.com/browse"
+    else:
+        # Regular market: use own event_ticker
+        et = market.get("event_ticker", "")
+        if et:
+            return _build_kalshi_url(et)
+        return "https://kalshi.com/browse"
+
+
+def _build_market_title(market: dict) -> str:
+    """Return a clean display title for the market."""
+    ticker = market.get("ticker", "")
+    raw_title = market.get("title") or market.get("name") or ticker
+
+    if _is_mve_market(ticker):
+        return _clean_parlay_title(raw_title)
+    return raw_title
+
 if ENV == "demo":
     REST_BASE = "https://demo-api.kalshi.co"
     WS_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
@@ -223,20 +301,23 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
             new_tickers = pick_us_politics_tickers(markets)[:SUBSCRIBE_TICKER_LIMIT]
             
             new_map = {}
+            new_link_map = {}
             new_close_times = {}
             for m in markets:
                 t = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
-                title = m.get("title") or m.get("name")
-                if t and title:
+                if not t:
+                    continue
+                title = _build_market_title(m)
+                if title:
                     new_map[t] = title
-                if t:
-                    ct_str = m.get("close_time") or m.get("expiration_time") or m.get("expected_expiration_time")
-                    if ct_str:
-                        try:
-                            ct = datetime.datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
-                            new_close_times[t] = ct
-                        except (ValueError, TypeError):
-                            pass
+                new_link_map[t] = _build_market_link(m)
+                ct_str = m.get("close_time") or m.get("expiration_time") or m.get("expected_expiration_time")
+                if ct_str:
+                    try:
+                        ct = datetime.datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
+                        new_close_times[t] = ct
+                    except (ValueError, TypeError):
+                        pass
             
             added = set(new_tickers) - set(state["tickers"])
             removed = set(state["tickers"]) - set(new_tickers)
@@ -244,8 +325,10 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
             state["tickers"] = new_tickers
             state["ticker_map"].update(new_map)
             state["close_time_map"].update(new_close_times)
-            # Also update alert_manager's map reference
+            state["link_map"].update(new_link_map)
+            # Also update alert_manager's map references
             state["alert_manager"].ticker_map = state["ticker_map"]
+            state["alert_manager"].link_map = state["link_map"]
             
             logger.info(f"🔄 Market refresh done: {len(new_tickers)} tickers (+{len(added)} new, -{len(removed)} dropped)")
             if added:
@@ -274,11 +357,11 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
             logger.error(f"Market refresh error: {e}")
 
 
-async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str], close_time_map: Dict[str, Any] = None) -> None:
+async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeStore, ticker_map: Dict[str, str], close_time_map: Dict[str, Any] = None, link_map: Dict[str, str] = None) -> None:
     baselines = MarketBaselines()
     clusters = MarketClusterTracker(window_seconds=300)
     alerter = Alerter()
-    alert_manager = AlertManager(alerter, daily_cap=20, ticker_map=ticker_map)
+    alert_manager = AlertManager(alerter, daily_cap=20, ticker_map=ticker_map, link_map=link_map)
     close_time_map = close_time_map or {}
     
     # Shared state for the refresh task
@@ -286,6 +369,7 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
         "tickers": list(market_tickers),
         "ticker_map": ticker_map,
         "close_time_map": close_time_map,
+        "link_map": link_map or {},
         "alert_manager": alert_manager,
         "ws": None,
         "msg_id": 1,
@@ -480,30 +564,34 @@ def main():
     tickers = tickers[:SUBSCRIBE_TICKER_LIMIT]
     logger.info(f"Selected {len(tickers)} tickers for monitoring.")
     
-    # Build title map and close_time map for human readable alerts + scoring
-    ticker_map = {}     # {ticker: "Title"}
+    # Build title map, link map and close_time map for human readable alerts + scoring
+    ticker_map = {}     # {ticker: "Clean Title"}
+    link_map = {}       # {ticker: "https://kalshi.com/markets/..."}
     close_time_map = {} # {ticker: datetime or None}
     for m in markets:
         t = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
-        title = m.get("title") or m.get("name")
-        if t and title:
+        if not t:
+            continue
+        # Clean title
+        title = _build_market_title(m)
+        if title:
             ticker_map[t] = title
-        if t:
-            # Parse close_time / expiration_time from REST
-            ct_str = m.get("close_time") or m.get("expiration_time") or m.get("expected_expiration_time")
-            if ct_str:
-                try:
-                    # Kalshi returns ISO 8601 (e.g. "2026-03-01T12:00:00Z")
-                    ct = datetime.datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
-                    close_time_map[t] = ct
-                except (ValueError, TypeError):
-                    pass
+        # Working URL
+        link_map[t] = _build_market_link(m)
+        # Parse close_time / expiration_time from REST
+        ct_str = m.get("close_time") or m.get("expiration_time") or m.get("expected_expiration_time")
+        if ct_str:
+            try:
+                ct = datetime.datetime.fromisoformat(ct_str.replace("Z", "+00:00"))
+                close_time_map[t] = ct
+            except (ValueError, TypeError):
+                pass
     logger.info(f"Close times found for {len(close_time_map)} markets.")
 
     store = TradeStore(db_path="kalshi_trades.db", env=ENV)
 
     try:
-        asyncio.run(ws_listen_trades(private_key, tickers, store, ticker_map, close_time_map))
+        asyncio.run(ws_listen_trades(private_key, tickers, store, ticker_map, close_time_map, link_map))
     except KeyboardInterrupt:
         logger.info("Shutdown requested (SIGINT).")
     except Exception as e:

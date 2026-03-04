@@ -4,10 +4,11 @@ import time
 from collections import defaultdict
 
 class AlertManager:
-    def __init__(self, alerter, daily_cap=20, ticker_map=None):
+    def __init__(self, alerter, daily_cap=20, ticker_map=None, link_map=None):
         self.alerter = alerter
         self.daily_cap = daily_cap
         self.ticker_map = ticker_map or {}
+        self.link_map = link_map or {}
         self.alerts_sent_today = 0
         self._cap_date = datetime.date.today()
         
@@ -62,7 +63,7 @@ class AlertManager:
 
         title = self.ticker_map.get(ticker, ticker)
         no_price = 100 - yes_price
-        link = f"https://kalshi.com/markets/{ticker}"
+        link = self.link_map.get(ticker, f"https://kalshi.com/browse")
 
         reason_lines = ""
         for r in reasons:
@@ -107,7 +108,8 @@ class AlertManager:
         market_lines = ""
         for i, t in enumerate(markets, 1):
             title = self.ticker_map.get(t, t)
-            market_lines += f"{i}. <a href='https://kalshi.com/markets/{t}'>{title}</a>\n"
+            link = self.link_map.get(t, "https://kalshi.com/browse")
+            market_lines += f"{i}. <a href='{link}'>{title}</a>\n"
 
         msg = (
             f"🔥 <b>Correlated Activity — {tier_label}</b>\n"
@@ -144,7 +146,7 @@ class AlertManager:
 
         if is_sample or is_large:
             title = self.ticker_map.get(ticker, ticker)
-            link = f"https://kalshi.com/markets/{ticker}"
+            link = self.link_map.get(ticker, "https://kalshi.com/browse")
             no_price = 100 - yes_price
 
             reason_lines = ""
