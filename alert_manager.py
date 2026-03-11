@@ -2,6 +2,7 @@ import datetime
 import os
 import time
 from collections import defaultdict
+from ai_reasoning import analyze_trade
 
 class AlertManager:
     def __init__(self, alerter, daily_cap=20, ticker_map=None, link_map=None, option_labels_map=None):
@@ -71,6 +72,12 @@ class AlertManager:
         for r in reasons:
             reason_lines += f"  • {r}\n"
 
+        # AI reasoning
+        ai_block = ""
+        analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons)
+        if analysis:
+            ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
+
         msg = (
             f"🚨 <b>Unusual Activity Detected</b>\n"
             f"\n"
@@ -83,6 +90,7 @@ class AlertManager:
             f"\n"
             f"📈 <b>Why flagged:</b>\n"
             f"{reason_lines}"
+            f"{ai_block}"
             f"\n"
             f"🔗 <a href='{link}'>Trade on Kalshi</a>"
         )
@@ -157,6 +165,12 @@ class AlertManager:
             for r in reasons:
                 reason_lines += f"  • {r}\n"
 
+            # AI reasoning
+            ai_block = ""
+            analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons)
+            if analysis:
+                ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
+
             msg = (
                 f"❓ <b>{title}</b>\n"
                 f"\n"
@@ -167,6 +181,7 @@ class AlertManager:
                 f"\n"
                 f"📈 <b>Why flagged:</b>\n"
                 f"{reason_lines}"
+                f"{ai_block}"
                 f"\n"
                 f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
                 f"🕐 {ts_str}"
