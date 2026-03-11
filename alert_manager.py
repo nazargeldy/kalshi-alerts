@@ -24,14 +24,20 @@ class AlertManager:
 
         # Debug Config
         self.alert_mode = os.getenv("ALERT_MODE", "prod").lower()
-        self.debug_sample_every = int(os.getenv("DEBUG_SAMPLE_EVERY", "20"))
-        self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "200"))
         self.debug_max_per_min = int(os.getenv("DEBUG_MAX_PER_MIN", "3"))
+        self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "50"))
 
-        # Debug State
-        self.debug_trades_seen = 0
+        # Debug State — rate limiting
         self.debug_sent_last_min = 0
         self.debug_window_start = 0
+
+        # Trade aggregation: collect trades per ticker over a window
+        self.AGG_WINDOW = int(os.getenv("DEBUG_AGG_WINDOW", "120"))  # 2 min
+        self.AGG_MIN_TRADES = int(os.getenv("DEBUG_AGG_MIN_TRADES", "3"))  # min trades to alert
+        self.AGG_MIN_CONTRACTS = int(os.getenv("DEBUG_AGG_MIN_CONTRACTS", "50"))  # min total contracts
+        # {ticker: {"trades": int, "contracts": int, "max_score": float,
+        #           "reasons": list, "yes_price": int, "first_ts": str, "start": float}}
+        self._agg_buckets = {}
 
     def _maybe_reset_daily_cap(self):
         """Reset the daily alert counter at midnight."""
@@ -74,7 +80,7 @@ class AlertManager:
 
         # AI reasoning
         ai_block = ""
-        analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons)
+        analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons, num_trades=1)
         if analysis:
             ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
 
@@ -139,58 +145,83 @@ class AlertManager:
         if self.alert_mode != "debug":
             return
 
-        self.debug_trades_seen += 1
-        
-        # Rate Limit Window Reset
         now = time.time()
+
+        # Accumulate into aggregation bucket
+        bucket = self._agg_buckets.get(ticker)
+        if bucket is None or (now - bucket["start"]) > self.AGG_WINDOW:
+            # Start new bucket
+            self._agg_buckets[ticker] = {
+                "trades": 1,
+                "contracts": contracts,
+                "max_score": score,
+                "reasons": list(reasons),
+                "yes_price": yes_price,
+                "first_ts": ts_str,
+                "start": now,
+            }
+            return
+
+        # Add to existing bucket
+        bucket["trades"] += 1
+        bucket["contracts"] += contracts
+        if score > bucket["max_score"]:
+            bucket["max_score"] = score
+            bucket["reasons"] = list(reasons)
+        bucket["yes_price"] = yes_price  # latest price
+
+        # Check if bucket is ready to fire
+        if bucket["contracts"] < self.AGG_MIN_CONTRACTS and bucket["trades"] < self.AGG_MIN_TRADES:
+            return
+
+        # Rate limit
         if now - self.debug_window_start > 60:
             self.debug_window_start = now
             self.debug_sent_last_min = 0
-
-        # Hard Cap Check
         if self.debug_sent_last_min >= self.debug_max_per_min:
             return
 
-        # Criteria Check: Sampling OR Size
-        is_sample = (self.debug_trades_seen % self.debug_sample_every == 0)
-        is_large = (contracts >= self.debug_min_contracts)
+        # Fire the aggregated alert
+        total_trades = bucket["trades"]
+        total_contracts = bucket["contracts"]
+        best_score = bucket["max_score"]
+        best_reasons = bucket["reasons"]
+        latest_yes = bucket["yes_price"]
 
-        if is_sample or is_large:
-            title = self.ticker_map.get(ticker, ticker)
-            link = self.link_map.get(ticker, "https://kalshi.com/browse")
-            no_price = 100 - yes_price
-            yes_label, no_label = self.option_labels_map.get(ticker, ("Yes", "No"))
+        title = self.ticker_map.get(ticker, ticker)
+        link = self.link_map.get(ticker, "https://kalshi.com/browse")
+        no_price = 100 - latest_yes
+        yes_label, no_label = self.option_labels_map.get(ticker, ("✅ Yes", "❌ No"))
 
-            reason_lines = ""
-            for r in reasons:
-                reason_lines += f"  • {r}\n"
+        reason_lines = ""
+        for r in best_reasons:
+            reason_lines += f"  • {r}\n"
 
-            # AI reasoning
-            ai_block = ""
-            analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons)
-            if analysis:
-                ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
+        # AI reasoning
+        ai_block = ""
+        analysis = analyze_trade(title, yes_label, no_label, latest_yes, total_contracts, best_score, best_reasons, num_trades=total_trades)
+        if analysis:
+            ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
 
-            msg = (
-                f"❓ <b>{title}</b>\n"
-                f"\n"
-                f"1. {yes_label} — {yes_price}%\n"
-                f"2. {no_label} — {no_price}%\n"
-                f"\n"
-                f"💰 {contracts:,} contracts · ⚡ Score: {score}/100\n"
-                f"\n"
-                f"📈 <b>Why flagged:</b>\n"
-                f"{reason_lines}"
-                f"{ai_block}"
-                f"\n"
-                f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
-                f"🕐 {ts_str}"
-            )
-            print(f"🧪 DEBUG ALERT SENT for {ticker}")
-            
-            # Send directly via alerter to bypass daily cap if desired, 
-            # OR use _send_internal to respect global safety.
-            # Using _send_internal is safer to prevent blowing up quota.
-            self._send_internal(msg)
-            
-            self.debug_sent_last_min += 1
+        msg = (
+            f"❓ <b>{title}</b>\n"
+            f"\n"
+            f"1. {yes_label} — {latest_yes}%\n"
+            f"2. {no_label} — {no_price}%\n"
+            f"\n"
+            f"📊 {total_trades} trades · 💰 {total_contracts:,} contracts · ⚡ Score: {best_score}/100\n"
+            f"\n"
+            f"📈 <b>Why flagged:</b>\n"
+            f"{reason_lines}"
+            f"{ai_block}"
+            f"\n"
+            f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
+            f"🕐 {ts_str}"
+        )
+        print(f"🧪 DEBUG ALERT SENT for {ticker} ({total_trades} trades, {total_contracts} contracts)")
+
+        self._send_internal(msg)
+        self.debug_sent_last_min += 1
+
+        # Reset bucket after sending
+        del self._agg_buckets[ticker]

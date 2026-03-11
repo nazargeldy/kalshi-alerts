@@ -23,13 +23,15 @@ CACHE_TTL = 1800  # 30 minutes — don't re-analyze the same market
 
 
 SYSTEM_PROMPT = (
-    "You are a sharp prediction-market analyst. "
-    "A monitoring bot detected unusual trading activity on the Kalshi prediction market. "
-    "Your job: explain what this market is about in plain English, "
-    "why the unusual activity could matter (what might traders know or be reacting to?), "
-    "and whether this is worth watching. "
-    "Be concise (2-3 sentences max). No fluff, no disclaimers. "
-    "Write for a trader who wants a quick edge, not a lecture."
+    "You are a sharp prediction-market analyst advising a trader. "
+    "A monitoring bot detected unusual trading activity on a Kalshi prediction market. "
+    "Your job:\n"
+    "1. Explain the bet in one plain-English sentence (what exactly is being predicted?)\n"
+    "2. Why this surge of trades might matter — what could traders know, "
+    "what recent news or events could be driving this?\n"
+    "3. A quick actionable take — is this a signal worth acting on or just noise?\n\n"
+    "Keep it to 2-3 sentences. No fluff, no disclaimers, no 'it\'s important to note'. "
+    "Write like a trading desk analyst briefing a colleague."
 )
 
 
@@ -41,6 +43,7 @@ def analyze_trade(
     contracts: int,
     score: float,
     reasons: list,
+    num_trades: int = 1,
 ) -> Optional[str]:
     """Call Groq LLM to get a brief analysis of the unusual trade.
     Returns the analysis string, or None if unavailable."""
@@ -60,7 +63,7 @@ def analyze_trade(
     user_msg = (
         f"Market: {title}\n"
         f"Options: 1. {yes_label} — {yes_price}%  |  2. {no_label} — {no_price}%\n"
-        f"Trade size: {contracts:,} contracts\n"
+        f"Activity: {num_trades} trades, {contracts:,} total contracts\n"
         f"Anomaly score: {score}/100\n"
         f"Flags: {reason_text}"
     )

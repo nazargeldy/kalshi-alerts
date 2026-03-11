@@ -82,9 +82,19 @@ SPORTS_TITLE_KEYWORDS = [
 # Title & URL helpers
 # =========================
 
-def _build_kalshi_url(event_ticker: str) -> str:
-    """Build a working Kalshi web URL from an event ticker."""
-    return f"https://kalshi.com/markets/{event_ticker.lower()}"
+def _build_kalshi_url(market: dict) -> str:
+    """Build a working Kalshi web URL.
+    Uses series_ticker if available (most reliable), otherwise event_ticker base."""
+    # series_ticker is injected by fetch_markets_for_series
+    st = market.get("_series_ticker", "")
+    if st:
+        return f"https://kalshi.com/markets/{st.lower()}"
+    # Fallback: strip year/date suffix from event_ticker
+    et = market.get("event_ticker", "")
+    base = et.split("-")[0] if et else ""
+    if base:
+        return f"https://kalshi.com/markets/{base.lower()}"
+    return "https://kalshi.com/browse"
 
 
 def _is_mve_market(ticker: str) -> bool:
@@ -117,23 +127,7 @@ def _clean_parlay_title(raw_title: str, max_legs: int = 3) -> str:
 
 def _build_market_link(market: dict) -> str:
     """Return the best working Kalshi URL for this market dict."""
-    ticker = market.get("ticker", "")
-
-    if _is_mve_market(ticker):
-        # For parlays, link to the first leg's base event
-        legs = market.get("mve_selected_legs") or []
-        if legs and isinstance(legs, list):
-            first_leg_et = legs[0].get("event_ticker", "")
-            if first_leg_et:
-                return _build_kalshi_url(first_leg_et)
-        # Fallback: just link to browse
-        return "https://kalshi.com/browse"
-    else:
-        # Regular market: use own event_ticker
-        et = market.get("event_ticker", "")
-        if et:
-            return _build_kalshi_url(et)
-        return "https://kalshi.com/browse"
+    return _build_kalshi_url(market)
 
 
 def _build_market_title(market: dict) -> str:
@@ -268,6 +262,8 @@ def fetch_markets_for_series(private_key, series_tickers: List[str]) -> List[Dic
             markets = data.get("markets", [])
             # Only keep active/open markets
             active = [m for m in markets if m.get("status") in ("active", "open")]
+            for m in active:
+                m["_series_ticker"] = st  # tag for URL building
             all_markets.extend(active)
         except Exception as e:
             logger.warning(f"Markets fetch error for series {st}: {e}")
