@@ -218,21 +218,50 @@ def load_private_key(path: str):
 # REST: market discovery
 # =========================
 
-def is_sports_market(ticker: str, title: str) -> bool:
-    """Return True if this market is sports-related (should be excluded)."""
-    t_upper = (ticker or "").upper()
-    for prefix in SPORTS_TICKER_PREFIXES:
-        if t_upper.startswith(prefix):
-            return True
-    t_lower = (title or "").lower()
-    for kw in SPORTS_TITLE_KEYWORDS:
-        if kw in t_lower:
-            return True
-    return False
+SPORTS_CATEGORIES = {"Sports", "Esports"}
+
+
+def fetch_non_sports_event_tickers(private_key, max_pages: int = 50) -> set:
+    """Fetch events from API, return set of event_tickers for non-sports categories."""
+    non_sports = set()
+    cursor = None
+    sign_path = "/trade-api/v2/events"
+
+    for page in range(max_pages):
+        params = "limit=200"
+        if cursor:
+            params += f"&cursor={cursor}"
+        url = f"{REST_BASE}{sign_path}?{params}"
+        headers = make_headers(private_key, "GET", sign_path)
+
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.error(f"Events fetch page {page} error: {e}")
+            break
+
+        events = data.get("events", [])
+        next_cursor = data.get("cursor")
+
+        for e in events:
+            cat = e.get("category", "")
+            if cat not in SPORTS_CATEGORIES:
+                et = e.get("event_ticker", "")
+                if et:
+                    non_sports.add(et)
+
+        if not next_cursor or not events:
+            break
+        cursor = next_cursor
+
+    logger.info(f"Events scan complete: {len(non_sports)} non-sports event tickers found.")
+    return non_sports
 
 
 def fetch_open_markets(private_key, max_pages: int = 10) -> List[Dict[str, Any]]:
-    """Fetch open markets with pagination to find enough non-sports results."""
+    """Fetch open markets with pagination."""
     all_markets = []
     cursor = None
     sign_path = "/trade-api/v2/markets"
@@ -274,17 +303,27 @@ def fetch_open_markets(private_key, max_pages: int = 10) -> List[Dict[str, Any]]
         raise RuntimeError("No markets fetched from API")
     return all_markets
 
-def pick_target_tickers(markets: List[Dict[str, Any]]) -> List[str]:
-    """Pick all non-sports market tickers."""
+
+def pick_target_tickers(markets: List[Dict[str, Any]], non_sports_events: set = None) -> List[str]:
+    """Pick non-sports market tickers using event category data."""
     tickers: List[str] = []
     for m in markets:
         ticker = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
-        title = m.get("title") or m.get("name") or ""
         status = (m.get("status") or "").lower()
+        event_ticker = m.get("event_ticker", "")
 
-        if not ticker: continue
-        if status and status not in ("open", "active"): continue
-        if is_sports_market(ticker, title): continue
+        if not ticker:
+            continue
+        if status and status not in ("open", "active"):
+            continue
+        # Use event category when available (reliable), fall back to ticker prefix blocklist
+        if non_sports_events is not None:
+            if event_ticker not in non_sports_events:
+                continue
+        else:
+            title = m.get("title") or m.get("name") or ""
+            if is_sports_market(ticker, title):
+                continue
         tickers.append(str(ticker))
 
     # de-dupe
@@ -295,6 +334,19 @@ def pick_target_tickers(markets: List[Dict[str, Any]]) -> List[str]:
             seen.add(t)
             out.append(t)
     return out
+
+
+def is_sports_market(ticker: str, title: str) -> bool:
+    """Fallback: Return True if this market looks sports-related by ticker/title."""
+    t_upper = (ticker or "").upper()
+    for prefix in SPORTS_TICKER_PREFIXES:
+        if t_upper.startswith(prefix):
+            return True
+    t_lower = (title or "").lower()
+    for kw in SPORTS_TITLE_KEYWORDS:
+        if kw in t_lower:
+            return True
+    return False
 
 
 # =========================
@@ -350,11 +402,15 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
         try:
             await asyncio.sleep(interval_sec)
             logger.info("🔄 Refreshing open markets...")
+            # Re-scan events for categories
+            non_sports_events = await asyncio.get_event_loop().run_in_executor(
+                None, fetch_non_sports_event_tickers, private_key
+            )
             markets = await asyncio.get_event_loop().run_in_executor(
                 None, fetch_open_markets, private_key
             )
             markets.sort(key=lambda m: int(m.get("volume") or 0), reverse=True)
-            new_tickers = pick_target_tickers(markets)[:SUBSCRIBE_TICKER_LIMIT]
+            new_tickers = pick_target_tickers(markets, non_sports_events)[:SUBSCRIBE_TICKER_LIMIT]
             
             new_map = {}
             new_link_map = {}
@@ -607,6 +663,12 @@ def main():
     private_key = load_private_key(PRIVATE_KEY_PATH)
 
     logger.info(f"Starting Monitor. ENV={ENV} REST_BASE={REST_BASE}")
+
+    # Phase 1: Discover non-sports event categories
+    logger.info("Scanning event categories...")
+    non_sports_events = fetch_non_sports_event_tickers(private_key)
+
+    # Phase 2: Fetch open markets
     logger.info("Fetching open markets...")
     try:
         markets = fetch_open_markets(private_key)
@@ -615,21 +677,16 @@ def main():
         return
 
     logger.info(f"Open markets fetched: {len(markets)}")
-    
-    # Log how many were filtered
-    sports_count = sum(1 for m in markets if is_sports_market(
-        m.get("ticker", ""), m.get("title", "")))
-    logger.info(f"Filtered out {sports_count} sports markets, {len(markets) - sports_count} remaining.")
-    
     markets.sort(key=lambda m: int(m.get("volume") or 0), reverse=True)
     
-    tickers = pick_target_tickers(markets)
+    tickers = pick_target_tickers(markets, non_sports_events)
     if not tickers:
-        logger.warning("No non-sports markets found. Try increasing max_pages.")
+        logger.warning("No non-sports markets found.")
         return
 
+    logger.info(f"Found {len(tickers)} non-sports markets (from {len(markets)} total).")
     tickers = tickers[:SUBSCRIBE_TICKER_LIMIT]
-    logger.info(f"Selected {len(tickers)} tickers for monitoring.")
+    logger.info(f"Subscribing to {len(tickers)} tickers.")
     
     # Build title map, link map, option labels and close_time map
     ticker_map = {}         # {ticker: "Clean Title"}
