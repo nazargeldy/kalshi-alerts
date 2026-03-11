@@ -65,7 +65,7 @@ class AlertManager:
         title = self.ticker_map.get(ticker, ticker)
         no_price = 100 - yes_price
         link = self.link_map.get(ticker, f"https://kalshi.com/browse")
-        yes_label, no_label = self.option_labels_map.get(ticker, ("YES", "NO"))
+        yes_label, no_label = self.option_labels_map.get(ticker, ("Yes", "No"))
 
         reason_lines = ""
         for r in reasons:
@@ -74,13 +74,14 @@ class AlertManager:
         msg = (
             f"🚨 <b>Unusual Activity Detected</b>\n"
             f"\n"
-            f"📊 <b>{title}</b>\n"
+            f"❓ <b>{title}</b>\n"
             f"\n"
             f"1. {yes_label} — {yes_price}%\n"
             f"2. {no_label} — {no_price}%\n"
             f"\n"
-            f"💰 {contracts:,} contracts\n"
-            f"⚡ Score: {score}/100\n"
+            f"💰 {contracts:,} contracts · ⚡ Score: {score}/100\n"
+            f"\n"
+            f"📈 <b>Why flagged:</b>\n"
             f"{reason_lines}"
             f"\n"
             f"🔗 <a href='{link}'>Trade on Kalshi</a>"
@@ -150,20 +151,21 @@ class AlertManager:
             title = self.ticker_map.get(ticker, ticker)
             link = self.link_map.get(ticker, "https://kalshi.com/browse")
             no_price = 100 - yes_price
-            yes_label, no_label = self.option_labels_map.get(ticker, ("YES", "NO"))
+            yes_label, no_label = self.option_labels_map.get(ticker, ("Yes", "No"))
 
             reason_lines = ""
             for r in reasons:
                 reason_lines += f"  • {r}\n"
 
             msg = (
-                f"📊 <b>{title}</b>\n"
+                f"❓ <b>{title}</b>\n"
                 f"\n"
                 f"1. {yes_label} — {yes_price}%\n"
                 f"2. {no_label} — {no_price}%\n"
                 f"\n"
-                f"💰 {contracts:,} contracts\n"
-                f"⚡ Score: {score}/100\n"
+                f"💰 {contracts:,} contracts · ⚡ Score: {score}/100\n"
+                f"\n"
+                f"📈 <b>Why flagged:</b>\n"
                 f"{reason_lines}"
                 f"\n"
                 f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"

@@ -30,13 +30,13 @@ def score_trade(
         z = (volume_proxy - median) / (1.4826 * mad + 1)
         if z >= 8:
             score += 40
-            reasons.append(f"size_z={z:.1f}")
+            reasons.append(f"Trade size {z:.1f}x above normal")
         elif z >= 5:
             score += 25
-            reasons.append(f"size_z={z:.1f}")
+            reasons.append(f"Trade size {z:.1f}x above normal")
         elif z >= 3:
             score += 10
-            reasons.append(f"size_z={z:.1f}")
+            reasons.append(f"Trade size {z:.1f}x above normal")
 
     # 2) Burst
     t1 = baselines.get("trades_1m", 0)
@@ -46,33 +46,33 @@ def score_trade(
 
     if burst >= 10:
         score += 25
-        reasons.append(f"burst={burst:.1f}x")
+        reasons.append(f"{burst:.0f}x spike in trade frequency")
     elif burst >= 6:
         score += 18
-        reasons.append(f"burst={burst:.1f}x")
+        reasons.append(f"{burst:.0f}x spike in trade frequency")
     elif burst >= 3:
         score += 10
-        reasons.append(f"burst={burst:.1f}x")
+        reasons.append(f"{burst:.0f}x spike in trade frequency")
 
     # 3) Short-dated
     if hours_to_close is not None:
         if hours_to_close <= 24:
             score += 20
-            reasons.append("short_dated<=24h")
+            reasons.append("Closes within 24 hours")
         elif hours_to_close <= 72:
             score += 12
-            reasons.append("short_dated<=72h")
+            reasons.append("Closes within 3 days")
         elif hours_to_close <= 168:
             score += 6
-            reasons.append("short_dated<=7d")
+            reasons.append("Closes within 7 days")
 
     # 4) Absolute size gate
     if volume_proxy >= 250_000:
         score += 20
-        reasons.append("abs_size>=250k")
+        reasons.append("Very large trade (volume > $2,500)")
     elif volume_proxy >= 100_000:
         score += 15
-        reasons.append("abs_size>=100k")
+        reasons.append("Large trade (volume > $1,000)")
 
     # 5) Price momentum — large price move coinciding with volume = informed flow
     pd5 = baselines.get("price_delta_5m")
@@ -89,13 +89,13 @@ def score_trade(
 
     if best_delta >= 25:  # 25+ cent move = massive
         score += 20
-        reasons.append(f"price_move={best_delta:+d}¢/{delta_window}")
+        reasons.append(f"Price shifted {best_delta:+d}¢ in {delta_window}")
     elif best_delta >= 15:  # 15+ cent move
         score += 14
-        reasons.append(f"price_move={best_delta:+d}¢/{delta_window}")
+        reasons.append(f"Price shifted {best_delta:+d}¢ in {delta_window}")
     elif best_delta >= 8:   # 8+ cent move
         score += 8
-        reasons.append(f"price_move={best_delta:+d}¢/{delta_window}")
+        reasons.append(f"Price shifted {best_delta:+d}¢ in {delta_window}")
 
     # 6) Conviction — buying at extreme odds suggests confidence
     # yes_price near 5-15¢ (long-shot YES) or 85-95¢ (long-shot NO) = high asymmetry

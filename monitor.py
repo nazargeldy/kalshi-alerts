@@ -57,13 +57,24 @@ KEY_ID = os.getenv("KALSHI_KEY_ID", "").strip()
 PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "").strip()
 
 REST_MARKET_LIMIT = int(os.getenv("KALSHI_REST_MARKET_LIMIT", "200"))
-SUBSCRIBE_TICKER_LIMIT = int(os.getenv("KALSHI_SUBSCRIBE_TICKER_LIMIT", "100"))
+SUBSCRIBE_TICKER_LIMIT = int(os.getenv("KALSHI_SUBSCRIBE_TICKER_LIMIT", "200"))
 
-US_POLITICS_KEYWORDS = [
-    "president", "trump", "biden", "house", "senate", "congress",
-    "election", "primary", "gop", "republican", "democrat", "democratic",
-    "supreme court", "scotus", "impeach", "cabinet", "vice president",
-    "yes", "no", "nba", "nfl", "points", "wins"
+# ── Sports blocklist ── exclude these, let everything else through ──
+SPORTS_TICKER_PREFIXES = (
+    "KXMVE",   # Multi-variable events (sports parlays)
+    "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXMLS", "KXNCAA",
+    "KXUFC", "KXBOXING", "KXPGA", "KXATP", "KXWTA",
+    "KXTENNIS", "KXGOLF", "KXSOCCER", "KXCRICKET",
+    "KXF1", "KXNASCAR", "KXSPORTS", "KXEPL", "KXFIFA",
+)
+
+SPORTS_TITLE_KEYWORDS = [
+    "nba", "nfl", "mlb", "nhl", "mls", "ncaa", "ufc",
+    "boxing match", "pga tour", " atp ", " wta ",
+    "super bowl", "world series", "stanley cup",
+    "parlay", "touchdown", "home run", "slam dunk",
+    "quarterback", "pitcher", "rebounds", "assists",
+    "strikeouts", "innings", "halftime",
 ]
 
 
@@ -147,34 +158,16 @@ def _build_market_title(market: dict) -> str:
 
 def _build_option_labels(market: dict) -> tuple:
     """Return (yes_label, no_label) for display in alerts.
-    For regular markets: uses yes_sub_title (e.g. 'Ken Paxton', 'Boston').
-    For parlays: shows the cleaned leg names.
+    Uses yes_sub_title / no_sub_title when available, falls back to Yes/No.
     """
-    ticker = market.get("ticker", "")
+    yes_sub = (market.get("yes_sub_title") or "").strip()
+    no_sub = (market.get("no_sub_title") or "").strip()
 
-    if _is_mve_market(ticker):
-        raw_title = market.get("title") or ""
-        legs = [l.strip() for l in raw_title.split(",") if l.strip()]
-        clean_legs = []
-        for leg in legs:
-            for prefix in ("yes ", "no "):
-                if leg.lower().startswith(prefix):
-                    leg = leg[len(prefix):]
-                    break
-            clean_legs.append(leg)
-        if clean_legs:
-            shown = clean_legs[:3]
-            yes_label = " + ".join(shown)
-            if len(clean_legs) > 3:
-                yes_label += f" (+{len(clean_legs) - 3})"
-            return (f"✅ {yes_label}", f"❌ Not all hit")
-        return ("✅ All legs hit", "❌ Not all hit")
-
-    # Regular market — use yes_sub_title as the YES-side name
-    sub = (market.get("yes_sub_title") or "").strip()
-    if sub:
-        return (sub, f"Not {sub}")
-    return ("YES", "NO")
+    if yes_sub and no_sub:
+        return (f"✅ {yes_sub}", f"❌ {no_sub}")
+    if yes_sub:
+        return (f"✅ {yes_sub}", f"❌ Not {yes_sub}")
+    return ("✅ Yes", "❌ No")
 
 if ENV == "demo":
     REST_BASE = "https://demo-api.kalshi.co"
@@ -225,33 +218,64 @@ def load_private_key(path: str):
 # REST: market discovery
 # =========================
 
-def looks_us_politics(title: str) -> bool:
-    t = (title or "").lower()
-    return any(k in t for k in US_POLITICS_KEYWORDS)
+def is_sports_market(ticker: str, title: str) -> bool:
+    """Return True if this market is sports-related (should be excluded)."""
+    t_upper = (ticker or "").upper()
+    for prefix in SPORTS_TICKER_PREFIXES:
+        if t_upper.startswith(prefix):
+            return True
+    t_lower = (title or "").lower()
+    for kw in SPORTS_TITLE_KEYWORDS:
+        if kw in t_lower:
+            return True
+    return False
 
-def fetch_open_markets(private_key) -> List[Dict[str, Any]]:
-    path = f"/trade-api/v2/markets?status=open&limit={REST_MARKET_LIMIT}"
-    url = REST_BASE + path
-    headers = make_headers(private_key, "GET", "/trade-api/v2/markets")
 
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logger.error(f"Failed to fetch markets: {e}")
-        raise
+def fetch_open_markets(private_key, max_pages: int = 10) -> List[Dict[str, Any]]:
+    """Fetch open markets with pagination to find enough non-sports results."""
+    all_markets = []
+    cursor = None
+    sign_path = "/trade-api/v2/markets"
 
-    if isinstance(data, dict) and "markets" in data and isinstance(data["markets"], list):
-        return data["markets"]
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-        return data["data"]
-    
-    raise RuntimeError(f"Unexpected markets response schema: {type(data)}")
+    for page in range(max_pages):
+        params = f"status=open&limit={REST_MARKET_LIMIT}"
+        if cursor:
+            params += f"&cursor={cursor}"
+        url = f"{REST_BASE}{sign_path}?{params}"
+        headers = make_headers(private_key, "GET", sign_path)
 
-def pick_us_politics_tickers(markets: List[Dict[str, Any]]) -> List[str]:
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch markets page {page}: {e}")
+            break
+
+        markets = []
+        next_cursor = None
+        if isinstance(data, dict) and "markets" in data:
+            markets = data["markets"]
+            next_cursor = data.get("cursor")
+        elif isinstance(data, list):
+            markets = data
+        elif isinstance(data, dict) and "data" in data:
+            markets = data["data"]
+            next_cursor = data.get("cursor")
+
+        all_markets.extend(markets)
+        logger.info(f"Fetched page {page + 1}: {len(markets)} markets (total: {len(all_markets)})")
+
+        if not next_cursor or not markets:
+            break
+        cursor = next_cursor
+
+    if not all_markets:
+        raise RuntimeError("No markets fetched from API")
+    return all_markets
+
+def pick_target_tickers(markets: List[Dict[str, Any]]) -> List[str]:
+    """Pick all non-sports market tickers."""
     tickers: List[str] = []
     for m in markets:
         ticker = m.get("ticker") or m.get("market_ticker") or m.get("symbol")
@@ -260,7 +284,7 @@ def pick_us_politics_tickers(markets: List[Dict[str, Any]]) -> List[str]:
 
         if not ticker: continue
         if status and status not in ("open", "active"): continue
-        if not looks_us_politics(title): continue
+        if is_sports_market(ticker, title): continue
         tickers.append(str(ticker))
 
     # de-dupe
@@ -330,7 +354,7 @@ async def refresh_markets_periodically(private_key, state: dict, interval_hours:
                 None, fetch_open_markets, private_key
             )
             markets.sort(key=lambda m: int(m.get("volume") or 0), reverse=True)
-            new_tickers = pick_us_politics_tickers(markets)[:SUBSCRIBE_TICKER_LIMIT]
+            new_tickers = pick_target_tickers(markets)[:SUBSCRIBE_TICKER_LIMIT]
             
             new_map = {}
             new_link_map = {}
@@ -591,11 +615,17 @@ def main():
         return
 
     logger.info(f"Open markets fetched: {len(markets)}")
+    
+    # Log how many were filtered
+    sports_count = sum(1 for m in markets if is_sports_market(
+        m.get("ticker", ""), m.get("title", "")))
+    logger.info(f"Filtered out {sports_count} sports markets, {len(markets) - sports_count} remaining.")
+    
     markets.sort(key=lambda m: int(m.get("volume") or 0), reverse=True)
     
-    tickers = pick_us_politics_tickers(markets)
+    tickers = pick_target_tickers(markets)
     if not tickers:
-        logger.warning("No US-politics markets found with current filter.")
+        logger.warning("No non-sports markets found. Try increasing max_pages.")
         return
 
     tickers = tickers[:SUBSCRIBE_TICKER_LIMIT]
