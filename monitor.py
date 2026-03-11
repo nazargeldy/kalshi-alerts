@@ -82,19 +82,9 @@ SPORTS_TITLE_KEYWORDS = [
 # Title & URL helpers
 # =========================
 
-def _base_event_ticker(event_ticker: str) -> str:
-    """Extract the base event ticker (before the first dash+digit/hash suffix).
-    E.g. 'KXATPMATCH-26MAR04BERSTR' → 'KXATPMATCH'
-         'KXSENATETXR-26'            → 'KXSENATETXR'
-    """
-    parts = event_ticker.split("-")
-    return parts[0] if parts else event_ticker
-
-
 def _build_kalshi_url(event_ticker: str) -> str:
-    """Build a working Kalshi web URL from a base event ticker."""
-    base = _base_event_ticker(event_ticker)
-    return f"https://kalshi.com/markets/{base.lower()}"
+    """Build a working Kalshi web URL from an event ticker."""
+    return f"https://kalshi.com/markets/{event_ticker.lower()}"
 
 
 def _is_mve_market(ticker: str) -> bool:
@@ -163,10 +153,9 @@ def _build_option_labels(market: dict) -> tuple:
     yes_sub = (market.get("yes_sub_title") or "").strip()
     no_sub = (market.get("no_sub_title") or "").strip()
 
-    if yes_sub and no_sub:
+    # If both subtitles are identical (e.g. both "Ethan Hawke"), just use Yes/No
+    if yes_sub and no_sub and yes_sub.lower() != no_sub.lower():
         return (f"✅ {yes_sub}", f"❌ {no_sub}")
-    if yes_sub:
-        return (f"✅ {yes_sub}", f"❌ Not {yes_sub}")
     return ("✅ Yes", "❌ No")
 
 if ENV == "demo":
