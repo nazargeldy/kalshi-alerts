@@ -1,3 +1,4 @@
+import csv
 import datetime
 import os
 import time
@@ -26,6 +27,7 @@ class AlertManager:
         self.alert_mode = os.getenv("ALERT_MODE", "prod").lower()
         self.debug_max_per_min = int(os.getenv("DEBUG_MAX_PER_MIN", "3"))
         self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "50"))
+        self.debug_min_score = float(os.getenv("DEBUG_MIN_SCORE", "25"))
 
         # Debug State — rate limiting
         self.debug_sent_last_min = 0
@@ -50,14 +52,29 @@ class AlertManager:
         self._maybe_reset_daily_cap()
         return self.alerts_sent_today < self.daily_cap
 
-    def _send_internal(self, msg: str):
+    def _send_internal(self, msg: str) -> bool:
         if not self.can_send():
             print("⚠️ Daily alert cap reached. Suppressing.")
-            return
+            return False
 
         success = self.alerter.send(msg)
         if success:
             self.alerts_sent_today += 1
+        return success
+
+    def _log_trade_to_csv(self, ticker: str, title: str, side_to_choose: str, price: int, score: float, link: str):
+        csv_file = "alerts_history.csv"
+        file_exists = os.path.isfile(csv_file)
+        try:
+            with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["Timestamp", "Ticker", "Name", "Side to Choose", "Price", "Score", "Link"])
+                
+                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                writer.writerow([now_str, ticker, title, side_to_choose, f"{price}¢", round(score, 1), link])
+        except Exception as e:
+            print(f"⚠️ Failed to log to CSV: {e}")
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
         # Production Rule: Score >= 60
@@ -98,10 +115,18 @@ class AlertManager:
             f"{reason_lines}"
             f"{ai_block}"
             f"\n"
-            f"🔗 <a href='{link}'>Trade on Kalshi</a>"
+            f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
+            f"<i>(Note: Kalshi groups some markets. Look for '{ticker}' if it is hidden)</i>"
         )
         print(f"🚨 SOLO ALERT SENT for {ticker}")
-        self._send_internal(msg)
+        
+        success = self._send_internal(msg)
+        if success:
+            # Add to CSV paper-trading log
+            side_to_choose = yes_label if yes_price <= 50 else no_label
+            price_to_buy = yes_price if yes_price <= 50 else no_price
+            self._log_trade_to_csv(ticker, title, side_to_choose, price_to_buy, score, link)
+
         self.market_last_alert[ticker] = now
 
     def process_cluster_alert(self, cluster_key: str, count: int, max_score: float, markets: list):
@@ -138,7 +163,15 @@ class AlertManager:
             f"⚡ Max Score: {max_score}/100"
         )
         print(f"🔥 CLUSTER ALERT SENT for {cluster_key}")
-        self._send_internal(msg)
+        
+        success = self._send_internal(msg)
+        if success:
+            # We log the lead market for tracking cluster alerts
+            lead_ticker = markets[0] if markets else cluster_key
+            lead_title = self.ticker_map.get(lead_ticker, cluster_key)
+            lead_link = self.link_map.get(lead_ticker, "https://kalshi.com/")
+            self._log_trade_to_csv(lead_ticker, f"[CLUSTER] {lead_title}", "N/A", 0, max_score, lead_link)
+        
         self.cluster_last_alert[cluster_key] = now
 
     def process_debug_trade(self, ticker: str, yes_price: int, contracts: int, volume_proxy: float, score: float, reasons: list, ts_str: str):
@@ -188,6 +221,10 @@ class AlertManager:
         best_reasons = bucket["reasons"]
         latest_yes = bucket["yes_price"]
 
+        # Do not send low-quality debug alerts.
+        if best_score < self.debug_min_score:
+            return
+
         title = self.ticker_map.get(ticker, ticker)
         link = self.link_map.get(ticker, "https://kalshi.com/browse")
         no_price = 100 - latest_yes
@@ -216,6 +253,7 @@ class AlertManager:
             f"{ai_block}"
             f"\n"
             f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
+            f"<i>(Note: Kalshi groups some markets. Look for '{ticker}' if it is hidden)</i>\n"
             f"🕐 {ts_str}"
         )
         print(f"🧪 DEBUG ALERT SENT for {ticker} ({total_trades} trades, {total_contracts} contracts)")

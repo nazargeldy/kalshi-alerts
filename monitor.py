@@ -87,14 +87,15 @@ def _build_kalshi_url(market: dict) -> str:
     Uses series_ticker if available (most reliable), otherwise event_ticker base."""
     # series_ticker is injected by fetch_markets_for_series
     st = market.get("_series_ticker", "")
+    ticker = market.get("ticker", "")
     if st:
-        return f"https://kalshi.com/markets/{st.lower()}"
+        return f"https://kalshi.com/markets/{st.lower()}?selection={ticker}"
     # Fallback: strip year/date suffix from event_ticker
     et = market.get("event_ticker", "")
     base = et.split("-")[0] if et else ""
     if base:
-        return f"https://kalshi.com/markets/{base.lower()}"
-    return "https://kalshi.com/browse"
+        return f"https://kalshi.com/markets/{base.lower()}?selection={ticker}"
+    return f"https://kalshi.com/browse"
 
 
 def _is_mve_market(ticker: str) -> bool:
@@ -318,11 +319,12 @@ def parse_trade_message(msg: Dict[str, Any]) -> Optional[TradePrint]:
     if not ticker:
         return None
     try:
-        yes_price = int(data.get("yes_price", 0))
-        no_price = int(data.get("no_price", 0))
+        yes_price = int(data.get("yes_price") or data.get("yes_dollars_fp") or 0)
+        no_price  = int(data.get("no_price") or data.get("no_dollars_fp") or 0)
         count = int(data.get("count", 0))
         ts = int(data.get("ts", 0))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Price parse fail: {data} -> {e}")
         return None
     return TradePrint(ticker, yes_price, no_price, count, ts)
 
@@ -534,6 +536,9 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                         ct = shared_state["close_time_map"].get(trade.market_ticker)
                         if ct:
                             now_utc = datetime.datetime.now(datetime.timezone.utc)
+                            # Hard guard: ignore already-closed markets to avoid stale alerts.
+                            if now_utc >= ct:
+                                continue
                             delta = ct - now_utc
                             hours_to_close = max(delta.total_seconds() / 3600, 0)
                         
@@ -593,9 +598,9 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
             shared_state["ws"] = None
             logger.error(f"WS disconnected/error: {e!r}")
             logger.warning(f"Reconnecting in {backoff}s...")
-            # Notify on Telegram if this is the first disconnect (backoff==1 means fresh disconnect)
-            if backoff <= 2:
-                alerter.send(f"⚠️ WS disconnected: {type(e).__name__}. Reconnecting...")
+            # Notify on Telegram if this is a persistent disconnect (backoff >= 16 means multiple failed retries)
+            if backoff >= 16:
+                alerter.send(f"⚠️ WS struggling to reconnect: {type(e).__name__}. Retrying...")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
