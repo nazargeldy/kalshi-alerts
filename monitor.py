@@ -318,14 +318,29 @@ def parse_trade_message(msg: Dict[str, Any]) -> Optional[TradePrint]:
     ticker = data.get("market_ticker")
     if not ticker:
         return None
+
+    def _to_cents(v: Any) -> int:
+        """Parse websocket price fields into cents (0-100)."""
+        if v is None or v == "":
+            return 0
+        n = float(v)
+        # yes_dollars_fp/no_dollars_fp may come as dollars in [0,1]
+        if 0 <= n <= 1:
+            return int(round(n * 100))
+        return int(round(n))
+
     try:
-        yes_price = int(data.get("yes_price") or data.get("yes_dollars_fp") or 0)
-        no_price  = int(data.get("no_price") or data.get("no_dollars_fp") or 0)
+        yes_price = _to_cents(data.get("yes_price") if data.get("yes_price") is not None else data.get("yes_dollars_fp"))
+        no_price = _to_cents(data.get("no_price") if data.get("no_price") is not None else data.get("no_dollars_fp"))
         count = int(data.get("count", 0))
         ts = int(data.get("ts", 0))
     except (ValueError, TypeError) as e:
         logger.warning(f"Price parse fail: {data} -> {e}")
         return None
+
+    if not (0 <= yes_price <= 100 and 0 <= no_price <= 100):
+        return None
+
     return TradePrint(ticker, yes_price, no_price, count, ts)
 
 

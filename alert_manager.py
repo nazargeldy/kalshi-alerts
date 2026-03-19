@@ -28,10 +28,14 @@ class AlertManager:
         self.debug_max_per_min = int(os.getenv("DEBUG_MAX_PER_MIN", "3"))
         self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "50"))
         self.debug_min_score = float(os.getenv("DEBUG_MIN_SCORE", "25"))
+        self.debug_daily_cap = int(os.getenv("DEBUG_DAILY_CAP", "120"))
+        self.debug_min_gap_sec = int(os.getenv("DEBUG_MIN_GAP_SEC", "20"))
 
         # Debug State — rate limiting
         self.debug_sent_last_min = 0
         self.debug_window_start = 0
+        self.debug_alerts_sent_today = 0
+        self.debug_last_sent_ts = 0.0
 
         # Trade aggregation: collect trades per ticker over a window
         self.AGG_WINDOW = int(os.getenv("DEBUG_AGG_WINDOW", "120"))  # 2 min
@@ -51,6 +55,10 @@ class AlertManager:
     def can_send(self) -> bool:
         self._maybe_reset_daily_cap()
         return self.alerts_sent_today < self.daily_cap
+
+    def can_send_debug(self) -> bool:
+        self._maybe_reset_daily_cap()
+        return self.debug_alerts_sent_today < self.debug_daily_cap
 
     def _send_internal(self, msg: str) -> bool:
         if not self.can_send():
@@ -225,6 +233,17 @@ class AlertManager:
         if best_score < self.debug_min_score:
             return
 
+        # Filter out nonsensical edge prices in debug alerts.
+        if latest_yes <= 0 or latest_yes >= 100:
+            return
+
+        # Smooth out burst notifications.
+        if now - self.debug_last_sent_ts < self.debug_min_gap_sec:
+            return
+
+        if not self.can_send_debug():
+            return
+
         title = self.ticker_map.get(ticker, ticker)
         link = self.link_map.get(ticker, "https://kalshi.com/browse")
         no_price = 100 - latest_yes
@@ -258,7 +277,12 @@ class AlertManager:
         )
         print(f"🧪 DEBUG ALERT SENT for {ticker} ({total_trades} trades, {total_contracts} contracts)")
 
-        self._send_internal(msg)
+        sent = self._send_internal(msg)
+        if not sent:
+            return
+
+        self.debug_alerts_sent_today += 1
+        self.debug_last_sent_ts = now
         self.debug_sent_last_min += 1
 
         # Reset bucket after sending
