@@ -14,43 +14,44 @@ class AlertManager:
         self.option_labels_map = option_labels_map or {}  # {ticker: (yes_label, no_label)}
         self.alerts_sent_today = 0
         self._cap_date = datetime.date.today()
-        
+
         # Cooldown tracking
-        self.market_last_alert = defaultdict(float) # ticker -> timestamp
-        self.cluster_last_alert = defaultdict(float) # cluster_key -> timestamp
-        
+        self.market_last_alert = defaultdict(float)  # ticker -> timestamp
+        self.cluster_last_alert = defaultdict(float)  # cluster_key -> timestamp
+
         # Production Config
-        self.MARKET_COOLDOWN = 600  # 10 mins
-        self.CLUSTER_COOLDOWN = 300 # 5 mins
+        self.MARKET_COOLDOWN = 600   # 10 mins between alerts for the same market
+        self.CLUSTER_COOLDOWN = 300  # 5 mins between alerts for the same cluster
 
         # Debug Config
         self.alert_mode = os.getenv("ALERT_MODE", "prod").lower()
         self.debug_max_per_min = int(os.getenv("DEBUG_MAX_PER_MIN", "3"))
         self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "50"))
-        self.debug_min_score = float(os.getenv("DEBUG_MIN_SCORE", "25"))
+        self.debug_min_score = float(os.getenv("DEBUG_MIN_SCORE", "20"))
         self.debug_daily_cap = int(os.getenv("DEBUG_DAILY_CAP", "120"))
-        self.debug_min_gap_sec = int(os.getenv("DEBUG_MIN_GAP_SEC", "20"))
+        self.debug_min_gap_sec = int(os.getenv("DEBUG_MIN_GAP_SEC", "15"))
 
         # Debug State — rate limiting
         self.debug_sent_last_min = 0
-        self.debug_window_start = 0
+        self.debug_window_start = 0.0
         self.debug_alerts_sent_today = 0
         self.debug_last_sent_ts = 0.0
 
         # Trade aggregation: collect trades per ticker over a window
-        self.AGG_WINDOW = int(os.getenv("DEBUG_AGG_WINDOW", "120"))  # 2 min
-        self.AGG_MIN_TRADES = int(os.getenv("DEBUG_AGG_MIN_TRADES", "3"))  # min trades to alert
+        self.AGG_WINDOW = int(os.getenv("DEBUG_AGG_WINDOW", "120"))         # 2 min window
+        self.AGG_MIN_TRADES = int(os.getenv("DEBUG_AGG_MIN_TRADES", "2"))   # min trades to alert
         self.AGG_MIN_CONTRACTS = int(os.getenv("DEBUG_AGG_MIN_CONTRACTS", "50"))  # min total contracts
         # {ticker: {"trades": int, "contracts": int, "max_score": float,
         #           "reasons": list, "yes_price": int, "first_ts": str, "start": float}}
         self._agg_buckets = {}
 
     def _maybe_reset_daily_cap(self):
-        """Reset the daily alert counter at midnight."""
+        """Reset daily alert counters at midnight."""
         today = datetime.date.today()
         if today != self._cap_date:
             self._cap_date = today
             self.alerts_sent_today = 0
+            self.debug_alerts_sent_today = 0  # also reset debug counter
 
     def can_send(self) -> bool:
         self._maybe_reset_daily_cap()
@@ -61,13 +62,29 @@ class AlertManager:
         return self.debug_alerts_sent_today < self.debug_daily_cap
 
     def _send_internal(self, msg: str) -> bool:
+        """Production send path — uses production daily cap."""
         if not self.can_send():
             print("⚠️ Daily alert cap reached. Suppressing.")
             return False
 
         success = self.alerter.send(msg)
+        if not success:
+            print(f"ALERT FAILED TO SEND: {msg[:100]}")
         if success:
             self.alerts_sent_today += 1
+        return success
+
+    def _send_debug_internal(self, msg: str) -> bool:
+        """Debug-only send path — uses a separate daily cap, NOT the production cap."""
+        if not self.can_send_debug():
+            print("⚠️ Debug daily alert cap reached. Suppressing.")
+            return False
+
+        success = self.alerter.send(msg)
+        if not success:
+            print(f"DEBUG ALERT FAILED TO SEND: {msg[:100]}")
+        if success:
+            self.debug_alerts_sent_today += 1
         return success
 
     def _log_trade_to_csv(self, ticker: str, title: str, side_to_choose: str, price: int, score: float, link: str):
@@ -78,15 +95,15 @@ class AlertManager:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow(["Timestamp", "Ticker", "Name", "Side to Choose", "Price", "Score", "Link"])
-                
+
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 writer.writerow([now_str, ticker, title, side_to_choose, f"{price}¢", round(score, 1), link])
         except Exception as e:
             print(f"⚠️ Failed to log to CSV: {e}")
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
-        # Production Rule: Score >= 60
-        if score < 60:
+        # Production Rule: Score >= 50
+        if score < 50:
             return
 
         now = time.time()
@@ -96,8 +113,8 @@ class AlertManager:
 
         title = self.ticker_map.get(ticker, ticker)
         no_price = 100 - yes_price
-        link = self.link_map.get(ticker, f"https://kalshi.com/browse")
-        yes_label, no_label = self.option_labels_map.get(ticker, ("Yes", "No"))
+        link = self.link_map.get(ticker, "https://kalshi.com/browse")
+        yes_label, no_label = self.option_labels_map.get(ticker, ("✅ Yes", "❌ No"))
 
         reason_lines = ""
         for r in reasons:
@@ -124,37 +141,41 @@ class AlertManager:
             f"{ai_block}"
             f"\n"
             f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
-            f"<i>(Note: Kalshi groups some markets. Look for '{ticker}' if it is hidden)</i>"
+            f"<i>(Note: Kalshi groups some markets. Look for '{ticker}' if hidden)</i>"
         )
-        print(f"🚨 SOLO ALERT SENT for {ticker}")
-        
+        print(f"🚨 SOLO ALERT SENT for {ticker} (score={score})")
+
         success = self._send_internal(msg)
         if success:
-            # Add to CSV paper-trading log
-            side_to_choose = yes_label if yes_price <= 50 else no_label
-            price_to_buy = yes_price if yes_price <= 50 else no_price
+            # Log to CSV — flag the side the anomaly likely favours
+            # If yes_price moved up recently (informed YES buying), go YES; otherwise NO.
+            # Simple heuristic: flag the side trading at the more extreme/surprising price.
+            if yes_price <= 50:
+                side_to_choose = yes_label
+                price_to_buy = yes_price
+            else:
+                side_to_choose = no_label
+                price_to_buy = no_price
             self._log_trade_to_csv(ticker, title, side_to_choose, price_to_buy, score, link)
 
         self.market_last_alert[ticker] = now
 
     def process_cluster_alert(self, cluster_key: str, count: int, max_score: float, markets: list):
         # Production Rules:
-        # Tier 1: Max Score >= 70 AND Count >= 2
-        # Tier 2: Max Score >= 60 AND Count >= 3
-        
-        is_tier_1 = (max_score >= 70 and count >= 2)
-        is_tier_2 = (max_score >= 60 and count >= 3)
-        
+        # Tier 1: Max Score >= 65 AND Count >= 2
+        # Tier 2: Max Score >= 50 AND Count >= 3
+        is_tier_1 = (max_score >= 65 and count >= 2)
+        is_tier_2 = (max_score >= 50 and count >= 3)
+
         if not (is_tier_1 or is_tier_2):
             return
 
         now = time.time()
-        # Rule: Cluster Cooldown
         if now - self.cluster_last_alert[cluster_key] < self.CLUSTER_COOLDOWN:
             return
 
         tier_label = "HIGH" if is_tier_1 else "MODERATE"
-        
+
         market_lines = ""
         for i, t in enumerate(markets, 1):
             title = self.ticker_map.get(t, t)
@@ -170,16 +191,15 @@ class AlertManager:
             f"\n"
             f"⚡ Max Score: {max_score}/100"
         )
-        print(f"🔥 CLUSTER ALERT SENT for {cluster_key}")
-        
+        print(f"🔥 CLUSTER ALERT SENT for {cluster_key} (count={count}, max_score={max_score})")
+
         success = self._send_internal(msg)
         if success:
-            # We log the lead market for tracking cluster alerts
             lead_ticker = markets[0] if markets else cluster_key
             lead_title = self.ticker_map.get(lead_ticker, cluster_key)
             lead_link = self.link_map.get(lead_ticker, "https://kalshi.com/")
             self._log_trade_to_csv(lead_ticker, f"[CLUSTER] {lead_title}", "N/A", 0, max_score, lead_link)
-        
+
         self.cluster_last_alert[cluster_key] = now
 
     def process_debug_trade(self, ticker: str, yes_price: int, contracts: int, volume_proxy: float, score: float, reasons: list, ts_str: str):
@@ -191,7 +211,7 @@ class AlertManager:
         # Accumulate into aggregation bucket
         bucket = self._agg_buckets.get(ticker)
         if bucket is None or (now - bucket["start"]) > self.AGG_WINDOW:
-            # Start new bucket
+            # Start a fresh bucket — don't return; check if this single trade qualifies
             self._agg_buckets[ticker] = {
                 "trades": 1,
                 "contracts": contracts,
@@ -201,47 +221,42 @@ class AlertManager:
                 "first_ts": ts_str,
                 "start": now,
             }
-            return
+            bucket = self._agg_buckets[ticker]
+        else:
+            # Accumulate into existing bucket
+            bucket["trades"] += 1
+            bucket["contracts"] += contracts
+            if score > bucket["max_score"]:
+                bucket["max_score"] = score
+                bucket["reasons"] = list(reasons)
+            bucket["yes_price"] = yes_price  # keep latest price
 
-        # Add to existing bucket
-        bucket["trades"] += 1
-        bucket["contracts"] += contracts
-        if score > bucket["max_score"]:
-            bucket["max_score"] = score
-            bucket["reasons"] = list(reasons)
-        bucket["yes_price"] = yes_price  # latest price
-
-        # Check if bucket is ready to fire
+        # Check if bucket meets firing thresholds (OR logic: either contracts or trade count)
         if bucket["contracts"] < self.AGG_MIN_CONTRACTS and bucket["trades"] < self.AGG_MIN_TRADES:
             return
 
-        # Rate limit
-        if now - self.debug_window_start > 60:
-            self.debug_window_start = now
-            self.debug_sent_last_min = 0
-        if self.debug_sent_last_min >= self.debug_max_per_min:
-            return
-
-        # Fire the aggregated alert
         total_trades = bucket["trades"]
         total_contracts = bucket["contracts"]
         best_score = bucket["max_score"]
         best_reasons = bucket["reasons"]
         latest_yes = bucket["yes_price"]
 
-        # Do not send low-quality debug alerts.
+        # Quality filters
         if best_score < self.debug_min_score:
             return
 
-        # Filter out nonsensical edge prices in debug alerts.
         if latest_yes <= 0 or latest_yes >= 100:
             return
 
-        # Smooth out burst notifications.
-        if now - self.debug_last_sent_ts < self.debug_min_gap_sec:
+        # Per-minute rate limit
+        if now - self.debug_window_start > 60:
+            self.debug_window_start = now
+            self.debug_sent_last_min = 0
+        if self.debug_sent_last_min >= self.debug_max_per_min:
             return
 
-        if not self.can_send_debug():
+        # Minimum gap between any two debug alerts (burst smoothing)
+        if now - self.debug_last_sent_ts < self.debug_min_gap_sec:
             return
 
         title = self.ticker_map.get(ticker, ticker)
@@ -260,30 +275,31 @@ class AlertManager:
             ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
 
         msg = (
+            f"🧪 <b>[DEBUG] Trade Alert</b>\n"
+            f"\n"
             f"❓ <b>{title}</b>\n"
             f"\n"
             f"1. {yes_label} — {latest_yes}%\n"
             f"2. {no_label} — {no_price}%\n"
             f"\n"
-            f"📊 {total_trades} trades · 💰 {total_contracts:,} contracts · ⚡ Score: {best_score}/100\n"
+            f"📊 {total_trades} trade(s) · 💰 {total_contracts:,} contracts · ⚡ Score: {best_score}/100\n"
             f"\n"
             f"📈 <b>Why flagged:</b>\n"
             f"{reason_lines}"
             f"{ai_block}"
             f"\n"
             f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
-            f"<i>(Note: Kalshi groups some markets. Look for '{ticker}' if it is hidden)</i>\n"
+            f"<i>(Look for '{ticker}' if hidden)</i>\n"
             f"🕐 {ts_str}"
         )
-        print(f"🧪 DEBUG ALERT SENT for {ticker} ({total_trades} trades, {total_contracts} contracts)")
-
-        sent = self._send_internal(msg)
+        sent = self._send_debug_internal(msg)
         if not sent:
             return
 
-        self.debug_alerts_sent_today += 1
+        print(f"🧪 DEBUG ALERT for {ticker} ({total_trades} trades, {total_contracts} contracts, score={best_score})")
+
         self.debug_last_sent_ts = now
         self.debug_sent_last_min += 1
 
-        # Reset bucket after sending
+        # Reset bucket after firing so the next burst starts fresh
         del self._agg_buckets[ticker]

@@ -51,8 +51,11 @@ def analyze_trade(
     if not GROQ_API_KEY:
         return None
 
-    # Check cache
-    cache_key = title
+    # Check cache — include score bucket and top reason so different alerts on
+    # the same market at the same price don't reuse a stale analysis.
+    score_bucket = int(score // 10) * 10  # round to nearest 10
+    top_reason = reasons[0][:30] if reasons else ""
+    cache_key = f"{title}:{yes_price}:{score_bucket}:{top_reason}"
     now = time.time()
     cached = _cache.get(cache_key)
     if cached and (now - cached[0]) < CACHE_TTL:

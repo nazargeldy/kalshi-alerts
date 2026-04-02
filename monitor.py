@@ -359,7 +359,7 @@ async def heartbeat(store: TradeStore, alert_manager, interval_sec: int = 60):
         except Exception as e:
             logger.error(f"Heartbeat error: {e}")
 
-async def refresh_markets_periodically(private_key, state: dict, interval_hours: float = 6.0):
+async def refresh_markets_periodically(private_key, state: dict, interval_hours: float = 2.0):
     """Re-fetch open markets every N hours, updating tickers + ticker_map."""
     interval_sec = interval_hours * 3600
     logger.info(f"Market-refresh task started (every {interval_hours}h).")
@@ -502,6 +502,9 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                 msg_id += 1
                 shared_state["msg_id"] = msg_id
                 await ws.send(json.dumps(sub))
+                if backoff > 1:
+                    logger.info("✅ WS reconnected successfully.")
+                    alerter.send("✅ Kalshi monitor reconnected.")
                 backoff = 1  # reset
 
                 async for raw in ws:
@@ -559,7 +562,8 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                         
                         score_result = score_trade(
                             volume_proxy, snap, hours_to_close,
-                            yes_price_cents=trade.yes_price
+                            yes_price_cents=trade.yes_price,
+                            contracts=trade.count,
                         )
                         
                         # DEBUG: Process every trade (internally throttled if ALERT_MODE=debug)
@@ -573,7 +577,7 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                             ts_str=ts_str
                         )
                         
-                        if score_result["score"] >= 60:
+                        if score_result["score"] >= 50:
                              logger.info(f"⚠️ HIGH SCORE {score_result['score']} | {trade.market_ticker} | {score_result['reasons']}")
                              
                              # 1. Attempt Solo Alert (Requires Production Thresholds)

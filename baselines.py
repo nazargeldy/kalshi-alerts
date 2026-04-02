@@ -60,7 +60,7 @@ class MarketBaselines:
 
         # Update 24h median + MAD
         vols_24h = [v for _, v in d["trades"]["24h"]]
-        if len(vols_24h) >= 5:  # minimum data
+        if len(vols_24h) >= 2:  # minimum 2 trades to start computing baseline
             med = statistics.median(vols_24h)
             abs_dev = [abs(v - med) for v in vols_24h]
             mad = statistics.median(abs_dev)
@@ -69,7 +69,15 @@ class MarketBaselines:
 
     def snapshot(self, market_ticker: str) -> Dict[str, Any]:
         if market_ticker not in self.data:
-            return {}
+            return {
+                "trades_1m": 0,
+                "trades_5m": 0,
+                "trades_60m": 0,
+                "median_24h": None,
+                "mad_24h": None,
+                "price_delta_5m": None,
+                "price_delta_60m": None,
+            }
 
         d = self.data[market_ticker]
 
