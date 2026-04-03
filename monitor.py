@@ -85,18 +85,17 @@ SPORTS_TITLE_KEYWORDS = [
 
 def _build_kalshi_url(market: dict) -> str:
     """Build a working Kalshi web URL.
-    Uses series_ticker if available (most reliable), otherwise event_ticker base."""
-    # series_ticker is injected by fetch_markets_for_series
-    st = market.get("_series_ticker", "")
-    ticker = market.get("ticker", "")
-    if st:
-        return f"https://kalshi.com/markets/{st.lower()}?selection={ticker}"
-    # Fallback: strip year/date suffix from event_ticker
+    Kalshi URL format: https://kalshi.com/markets/{event_ticker_lowercase}
+    event_ticker is the correct path segment — series_ticker is the parent series page.
+    """
     et = market.get("event_ticker", "")
-    base = et.split("-")[0] if et else ""
-    if base:
-        return f"https://kalshi.com/markets/{base.lower()}?selection={ticker}"
-    return f"https://kalshi.com/browse"
+    if et:
+        return f"https://kalshi.com/markets/{et.lower()}"
+    # Fallback: use injected series_ticker if event_ticker missing
+    st = market.get("_series_ticker", "")
+    if st:
+        return f"https://kalshi.com/markets/{st.lower()}"
+    return "https://kalshi.com/browse"
 
 
 def _is_mve_market(ticker: str) -> bool:

@@ -107,10 +107,7 @@ class AlertManager:
         """Build the exchange-aware footer line for alerts."""
         if _is_polymarket_ticker(ticker):
             return f"🔗 <a href='{link}'>Trade on Polymarket</a>"
-        return (
-            f"🔗 <a href='{link}'>Trade on Kalshi</a>\n"
-            f"<i>(Look for '{ticker}' if hidden)</i>"
-        )
+        return f"🔗 <a href='{link}'>Trade on Kalshi</a>"
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
         # Production Rule: Score >= 50
