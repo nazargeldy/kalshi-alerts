@@ -39,7 +39,7 @@ MAX_SEEN_HASHES     = 10_000  # cap on dedup set; older half trimmed when hit
 MARKET_PAGE_LIMIT   = 100     # markets per REST page
 MARKET_PAGE_CAP     = 50      # max pages to fetch (50 × 100 = 5,000 markets)
 
-# Sports / entertainment categories to exclude (case-insensitive substring match)
+# Categories to exclude (case-insensitive substring match on market.category)
 EXCLUDED_CATEGORIES: Set[str] = {
     "sports", "esports", "nfl", "nba", "mlb", "nhl", "mls", "ncaa",
     "soccer", "tennis", "golf", "boxing", "mma", "ufc", "formula 1",
@@ -47,6 +47,28 @@ EXCLUDED_CATEGORIES: Set[str] = {
     "entertainment", "awards", "oscars", "grammys", "emmys", "bafta",
     "celebrity", "reality tv",
 }
+
+# Keywords in the question title that make a market unactionable for a US trader.
+# Case-insensitive substring match on market.question.
+EXCLUDED_QUESTION_KEYWORDS: tuple = (
+    # Weather / temperature micro-markets
+    "temperature", "highest temp", "°c", "°f", " celsius", " fahrenheit",
+    "rainfall", "precipitation", "humidity", "max temp", "min temp",
+    "hottest", "coldest",
+    # Soccer clubs outside US (non-MLS)
+    "millwall", "norwich", "sheffield", "coventry", "ipswich", "burnley",
+    "leeds", "derby", "bristol", "cardiff", "stoke", "blackburn",
+    "middlesbrough", "hull city", "sunderland", "watford", "swansea",
+    "fulham", "brentford", "lazio", "roma", "napoli", "ac milan",
+    "juventus", "inter milan", "atletico", "villarreal", "betis",
+    "sevilla", "porto", "benfica", "ajax", "psv", "feyenoord",
+    "fenerbahce", "galatasaray", "besiktas",
+    # Micro-window crypto up/down (too noisy, too short to act on)
+    "up or down -",   # e.g. "Bitcoin Up or Down - April 3, 12:15AM"
+    "15am-", "30am-", "45am-", "00am-",
+    "15pm-", "30pm-", "45pm-", "00pm-",
+    "15-minute", "30-minute",
+)
 
 
 # ── Price helpers ─────────────────────────────────────────────────────────────
@@ -129,6 +151,10 @@ def fetch_poly_markets() -> List[Dict[str, Any]]:
             # Binary markets only (2 outcomes)
             outcomes = _parse_json_field(m.get("outcomes"), [])
             if len(outcomes) != 2:
+                continue
+            # Question-level keyword filter
+            question = (m.get("question") or m.get("title") or "").lower()
+            if any(kw in question for kw in EXCLUDED_QUESTION_KEYWORDS):
                 continue
             all_markets.append(m)
 
