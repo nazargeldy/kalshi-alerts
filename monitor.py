@@ -27,6 +27,7 @@ from clustering import MarketClusterTracker
 from cluster_utils import infer_cluster_key
 from alerter import Alerter
 from alert_manager import AlertManager
+from polymarket_monitor import poly_trade_loop
 
 
 # =========================
@@ -464,8 +465,11 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
 
     # Start Heartbeat
     asyncio.create_task(heartbeat(store, alert_manager))
-    # Start periodic market refresh (every 6 hours)
+    # Start periodic market refresh (every 2 hours)
     asyncio.create_task(refresh_markets_periodically(private_key, shared_state))
+    # Start Polymarket monitor (polls every 30s, shares same alert_manager)
+    asyncio.create_task(poly_trade_loop(alert_manager))
+    logger.info("Polymarket monitor task started.")
 
     backoff = 1
     msg_id = 1
