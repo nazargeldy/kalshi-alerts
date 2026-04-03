@@ -1,9 +1,47 @@
 import csv
 import datetime
 import os
+import re
 import time
 from collections import defaultdict
 from ai_reasoning import analyze_trade
+
+CSV_FILE = "alerts_history.csv"
+CSV_HEADERS = [
+    "Timestamp",        # when the alert fired
+    "Source",           # Kalshi | Polymarket
+    "Alert Type",       # SOLO | CLUSTER | DEBUG
+    "Market",           # clean title
+    "Side to Buy",      # which outcome to trade (YES label or NO label)
+    "Entry Price (¢)",  # price in cents at alert time
+    "Contracts Seen",   # how many contracts triggered the alert
+    "Score /100",       # anomaly score
+    "AI Lean",          # Leaning YES / Leaning NO / N/A (extracted from AI text)
+    "Reasons",          # pipe-separated list of why it was flagged
+    "Link",             # direct link to the market
+    # ── columns you fill in after the market resolves ──
+    "Result",           # WIN | LOSS | PUSH | SKIP (fill manually)
+    "Exit Price (¢)",   # what it closed at (fill manually)
+    "P&L per contract", # = Exit - Entry if WIN, = -Entry if LOSS (fill manually)
+    "Notes",            # anything you want to remember
+]
+
+
+def _extract_ai_lean(analysis: str) -> str:
+    """Pull 'Leaning YES' / 'Leaning NO' out of the AI analysis string."""
+    if not analysis:
+        return ""
+    m = re.search(r"[Ll]eaning\s+(YES|NO|Up|Down|yes|no)", analysis)
+    if m:
+        word = m.group(1).upper()
+        return f"Leaning {word}"
+    # Fallback: look for explicit direction words near the end
+    lower = analysis.lower()
+    if "leaning yes" in lower or "lean yes" in lower:
+        return "Leaning YES"
+    if "leaning no" in lower or "lean no" in lower:
+        return "Leaning NO"
+    return ""
 
 
 def _is_polymarket_ticker(ticker: str) -> bool:
@@ -17,17 +55,17 @@ class AlertManager:
         self.daily_cap = daily_cap
         self.ticker_map = ticker_map or {}
         self.link_map = link_map or {}
-        self.option_labels_map = option_labels_map or {}  # {ticker: (yes_label, no_label)}
+        self.option_labels_map = option_labels_map or {}
         self.alerts_sent_today = 0
         self._cap_date = datetime.date.today()
 
         # Cooldown tracking (shared across prod + debug)
-        self.market_last_alert = defaultdict(float)   # ticker -> timestamp
-        self.cluster_last_alert = defaultdict(float)  # cluster_key -> timestamp
+        self.market_last_alert = defaultdict(float)
+        self.cluster_last_alert = defaultdict(float)
 
         # Production Config
-        self.MARKET_COOLDOWN = 600   # 10 mins between alerts for the same market
-        self.CLUSTER_COOLDOWN = 300  # 5 mins between alerts for the same cluster
+        self.MARKET_COOLDOWN = 600   # 10 min between alerts for the same market
+        self.CLUSTER_COOLDOWN = 300  # 5 min between alerts for the same cluster
 
         # Debug Config
         self.alert_mode = os.getenv("ALERT_MODE", "prod").lower()
@@ -38,20 +76,21 @@ class AlertManager:
         self.debug_min_gap_sec = int(os.getenv("DEBUG_MIN_GAP_SEC", "120"))
         self.debug_market_cooldown = int(os.getenv("DEBUG_MARKET_COOLDOWN", "1800"))  # 30 min per market
 
-        # Debug State — rate limiting
+        # Debug State
         self.debug_sent_last_min = 0
         self.debug_window_start = 0.0
         self.debug_alerts_sent_today = 0
         self.debug_last_sent_ts = 0.0
 
-        # Trade aggregation: collect trades per ticker over a window
+        # Trade aggregation
         self.AGG_WINDOW = int(os.getenv("DEBUG_AGG_WINDOW", "120"))
         self.AGG_MIN_TRADES = int(os.getenv("DEBUG_AGG_MIN_TRADES", "3"))
         self.AGG_MIN_CONTRACTS = int(os.getenv("DEBUG_AGG_MIN_CONTRACTS", "100"))
         self._agg_buckets = {}
 
+    # ── Daily cap helpers ─────────────────────────────────────────────────────
+
     def _maybe_reset_daily_cap(self):
-        """Reset daily alert counters at midnight."""
         today = datetime.date.today()
         if today != self._cap_date:
             self._cap_date = today
@@ -66,51 +105,82 @@ class AlertManager:
         self._maybe_reset_daily_cap()
         return self.debug_alerts_sent_today < self.debug_daily_cap
 
+    # ── Send helpers ──────────────────────────────────────────────────────────
+
     def _send_internal(self, msg: str) -> bool:
-        """Production send path — uses production daily cap."""
         if not self.can_send():
-            print("⚠️ Daily alert cap reached. Suppressing.")
+            print("⚠️ Daily alert cap reached.")
             return False
         success = self.alerter.send(msg)
-        if not success:
-            print(f"ALERT FAILED TO SEND: {msg[:100]}")
         if success:
             self.alerts_sent_today += 1
+        else:
+            print(f"ALERT FAILED: {msg[:80]}")
         return success
 
     def _send_debug_internal(self, msg: str) -> bool:
-        """Debug-only send path — separate daily cap, never touches production cap."""
         if not self.can_send_debug():
-            print("⚠️ Debug daily alert cap reached. Suppressing.")
+            print("⚠️ Debug daily cap reached.")
             return False
         success = self.alerter.send(msg)
-        if not success:
-            print(f"DEBUG ALERT FAILED TO SEND: {msg[:100]}")
         if success:
             self.debug_alerts_sent_today += 1
+        else:
+            print(f"DEBUG ALERT FAILED: {msg[:80]}")
         return success
 
-    def _log_trade_to_csv(self, ticker: str, title: str, side_to_choose: str, price: int, score: float, link: str):
-        csv_file = "alerts_history.csv"
-        file_exists = os.path.isfile(csv_file)
+    # ── CSV logging ───────────────────────────────────────────────────────────
+
+    def _log_to_csv(
+        self,
+        ticker: str,
+        title: str,
+        source: str,
+        alert_type: str,
+        side: str,
+        entry_price: int,
+        contracts: int,
+        score: float,
+        reasons: list,
+        link: str,
+        analysis: str = "",
+    ):
+        file_exists = os.path.isfile(CSV_FILE)
         try:
-            with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
+            with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 if not file_exists:
-                    writer.writerow(["Timestamp", "Ticker", "Name", "Side to Choose", "Price", "Score", "Link"])
-                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                writer.writerow([now_str, ticker, title, side_to_choose, f"{price}¢", round(score, 1), link])
+                    writer.writerow(CSV_HEADERS)
+                writer.writerow([
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    source,
+                    alert_type,
+                    title,
+                    side,
+                    f"{entry_price}¢",
+                    contracts,
+                    round(score, 1),
+                    _extract_ai_lean(analysis),
+                    " | ".join(reasons),
+                    link,
+                    "",   # Result — fill manually
+                    "",   # Exit Price — fill manually
+                    "",   # P&L — fill manually
+                    "",   # Notes — fill manually
+                ])
         except Exception as e:
-            print(f"⚠️ Failed to log to CSV: {e}")
+            print(f"⚠️ CSV log failed: {e}")
+
+    # ── Footer ────────────────────────────────────────────────────────────────
 
     def _build_footer(self, ticker: str, link: str) -> str:
-        """Build the exchange-aware footer line for alerts."""
         if _is_polymarket_ticker(ticker):
             return f"🔗 <a href='{link}'>Trade on Polymarket</a>"
         return f"🔗 <a href='{link}'>Trade on Kalshi</a>"
 
+    # ── Alerts ────────────────────────────────────────────────────────────────
+
     def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
-        # Production Rule: Score >= 50
         if score < 50:
             return
 
@@ -118,19 +188,15 @@ class AlertManager:
         if now - self.market_last_alert[ticker] < self.MARKET_COOLDOWN:
             return
 
-        title = self.ticker_map.get(ticker, ticker[:40])
-        no_price = 100 - yes_price
-        link = self.link_map.get(ticker, "https://kalshi.com/browse")
+        title     = self.ticker_map.get(ticker, ticker[:40])
+        no_price  = 100 - yes_price
+        link      = self.link_map.get(ticker, "https://kalshi.com/browse")
         yes_label, no_label = self.option_labels_map.get(ticker, ("✅ Yes", "❌ No"))
+        source    = "Polymarket" if _is_polymarket_ticker(ticker) else "Kalshi"
 
         reason_lines = "".join(f"  • {r}\n" for r in reasons)
-
-        ai_block = ""
-        analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons, num_trades=1)
-        if analysis:
-            ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
-
-        source = "Polymarket" if _is_polymarket_ticker(ticker) else "Kalshi"
+        analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons, num_trades=1) or ""
+        ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n" if analysis else ""
 
         msg = (
             f"🚨 <b>Unusual Activity — {source}</b>\n"
@@ -148,15 +214,17 @@ class AlertManager:
             f"\n"
             f"{self._build_footer(ticker, link)}"
         )
-        print(f"🚨 SOLO ALERT [{source}] {ticker[:20]} (score={score})")
+        print(f"🚨 SOLO [{source}] {ticker[:20]} score={score}")
 
         success = self._send_internal(msg)
         if success:
+            # Side = the surprising/underdog side (cheaper one is where the anomaly likely is)
             if yes_price <= 50:
-                side_to_choose, price_to_buy = yes_label, yes_price
+                side, entry = yes_label, yes_price
             else:
-                side_to_choose, price_to_buy = no_label, 100 - yes_price
-            self._log_trade_to_csv(ticker, title, side_to_choose, price_to_buy, score, link)
+                side, entry = no_label, no_price
+            self._log_to_csv(ticker, title, source, "SOLO", side, entry,
+                             contracts, score, reasons, link, analysis)
 
         self.market_last_alert[ticker] = now
 
@@ -175,9 +243,9 @@ class AlertManager:
 
         market_lines = ""
         for i, t in enumerate(markets, 1):
-            title = self.ticker_map.get(t, t[:40])
-            link = self.link_map.get(t, "https://kalshi.com/browse")
-            market_lines += f"{i}. <a href='{link}'>{title}</a>\n"
+            t_title = self.ticker_map.get(t, t[:40])
+            t_link  = self.link_map.get(t, "https://kalshi.com/browse")
+            market_lines += f"{i}. <a href='{t_link}'>{t_title}</a>\n"
 
         msg = (
             f"🔥 <b>Correlated Activity [{source}] — {tier_label}</b>\n"
@@ -188,14 +256,18 @@ class AlertManager:
             f"\n"
             f"⚡ Max Score: {max_score}/100"
         )
-        print(f"🔥 CLUSTER ALERT [{source}] {cluster_key} (count={count}, max_score={max_score})")
+        print(f"🔥 CLUSTER [{source}] {cluster_key} count={count} max={max_score}")
 
         success = self._send_internal(msg)
         if success:
-            lead_ticker = markets[0] if markets else cluster_key
-            lead_title = self.ticker_map.get(lead_ticker, cluster_key[:40])
-            lead_link = self.link_map.get(lead_ticker, "https://kalshi.com/")
-            self._log_trade_to_csv(lead_ticker, f"[CLUSTER] {lead_title}", "N/A", 0, max_score, lead_link)
+            lead = markets[0] if markets else cluster_key
+            self._log_to_csv(
+                lead,
+                f"[CLUSTER] {self.ticker_map.get(lead, cluster_key[:40])}",
+                source, "CLUSTER", "N/A", 0, 0, max_score,
+                [f"{count} correlated markets, tier={tier_label}"],
+                self.link_map.get(lead, "https://kalshi.com/"),
+            )
 
         self.cluster_last_alert[cluster_key] = now
 
@@ -205,7 +277,7 @@ class AlertManager:
 
         now = time.time()
 
-        # Per-market cooldown in debug mode — prevents duplicate alerts
+        # Per-market cooldown
         if now - self.market_last_alert[ticker] < self.debug_market_cooldown:
             return
 
@@ -213,13 +285,9 @@ class AlertManager:
         bucket = self._agg_buckets.get(ticker)
         if bucket is None or (now - bucket["start"]) > self.AGG_WINDOW:
             self._agg_buckets[ticker] = {
-                "trades": 1,
-                "contracts": contracts,
-                "max_score": score,
-                "reasons": list(reasons),
-                "yes_price": yes_price,
-                "first_ts": ts_str,
-                "start": now,
+                "trades": 1, "contracts": contracts,
+                "max_score": score, "reasons": list(reasons),
+                "yes_price": yes_price, "first_ts": ts_str, "start": now,
             }
             bucket = self._agg_buckets[ticker]
         else:
@@ -230,15 +298,14 @@ class AlertManager:
                 bucket["reasons"] = list(reasons)
             bucket["yes_price"] = yes_price
 
-        # Threshold check
         if bucket["contracts"] < self.AGG_MIN_CONTRACTS and bucket["trades"] < self.AGG_MIN_TRADES:
             return
 
-        total_trades     = bucket["trades"]
-        total_contracts  = bucket["contracts"]
-        best_score       = bucket["max_score"]
-        best_reasons     = bucket["reasons"]
-        latest_yes       = bucket["yes_price"]
+        total_trades    = bucket["trades"]
+        total_contracts = bucket["contracts"]
+        best_score      = bucket["max_score"]
+        best_reasons    = bucket["reasons"]
+        latest_yes      = bucket["yes_price"]
 
         if best_score < self.debug_min_score:
             return
@@ -252,7 +319,6 @@ class AlertManager:
         if self.debug_sent_last_min >= self.debug_max_per_min:
             return
 
-        # Global burst smoothing
         if now - self.debug_last_sent_ts < self.debug_min_gap_sec:
             return
 
@@ -263,11 +329,8 @@ class AlertManager:
         source    = "Polymarket" if _is_polymarket_ticker(ticker) else "Kalshi"
 
         reason_lines = "".join(f"  • {r}\n" for r in best_reasons)
-
-        ai_block = ""
-        analysis = analyze_trade(title, yes_label, no_label, latest_yes, total_contracts, best_score, best_reasons, num_trades=total_trades)
-        if analysis:
-            ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n"
+        analysis = analyze_trade(title, yes_label, no_label, latest_yes, total_contracts, best_score, best_reasons, num_trades=total_trades) or ""
+        ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n" if analysis else ""
 
         msg = (
             f"🧪 <b>[DEBUG] {source} Alert</b>\n"
@@ -291,9 +354,17 @@ class AlertManager:
         if not sent:
             return
 
-        print(f"🧪 DEBUG [{source}] {ticker[:20]} ({total_trades} trades, {total_contracts} contracts, score={best_score})")
+        print(f"🧪 DEBUG [{source}] {ticker[:20]} trades={total_trades} contracts={total_contracts} score={best_score}")
         self.debug_last_sent_ts = now
         self.debug_sent_last_min += 1
-        self.market_last_alert[ticker] = now  # apply cooldown to prevent dupes
+        self.market_last_alert[ticker] = now
+
+        # Log to CSV for P&L tracking
+        if latest_yes <= 50:
+            side, entry = yes_label, latest_yes
+        else:
+            side, entry = no_label, no_price
+        self._log_to_csv(ticker, title, source, "DEBUG", side, entry,
+                         total_contracts, best_score, best_reasons, link, analysis)
 
         del self._agg_buckets[ticker]
