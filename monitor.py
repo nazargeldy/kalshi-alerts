@@ -60,22 +60,39 @@ PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "").strip()
 REST_MARKET_LIMIT = int(os.getenv("KALSHI_REST_MARKET_LIMIT", "200"))
 SUBSCRIBE_TICKER_LIMIT = int(os.getenv("KALSHI_SUBSCRIBE_TICKER_LIMIT", "200"))
 
-# ── Sports blocklist ── exclude these, let everything else through ──
+# ── Categories that are entirely sports/entertainment — block all ──
+BLOCKED_CATEGORIES = {
+    "Sports", "Esports",
+}
+
+# ── Series ticker prefixes that are always sports ──
 SPORTS_TICKER_PREFIXES = (
-    "KXMVE",   # Multi-variable events (sports parlays)
-    "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXMLS", "KXNCAA",
-    "KXUFC", "KXBOXING", "KXPGA", "KXATP", "KXWTA",
-    "KXTENNIS", "KXGOLF", "KXSOCCER", "KXCRICKET",
-    "KXF1", "KXNASCAR", "KXSPORTS", "KXEPL", "KXFIFA",
+    "KXMVE",                                              # parlays/combos
+    "KXNBA", "KXNFL", "KXMLB", "KXNHL", "KXMLS",
+    "KXNCAA", "KXUFC", "KXBOXING", "KXPGA",
+    "KXATP", "KXWTA", "KXTENNIS", "KXGOLF",
+    "KXSOCCER", "KXCRICKET", "KXF1", "KXNASCAR",
+    "KXSPORTS", "KXEPL", "KXFIFA", "KXCFL",
+    "KXNHLJN",                                            # NHL junior
 )
 
+# ── Title keywords that identify a sports market regardless of category ──
 SPORTS_TITLE_KEYWORDS = [
+    # leagues / tournaments
     "nba", "nfl", "mlb", "nhl", "mls", "ncaa", "ufc",
-    "boxing match", "pga tour", " atp ", " wta ",
-    "super bowl", "world series", "stanley cup",
-    "parlay", "touchdown", "home run", "slam dunk",
+    "pga tour", "lpga", " atp ", " wta ", "wimbledon",
+    "super bowl", "world series", "stanley cup", "champions league",
+    "premier league", "la liga", "serie a", "bundesliga",
+    "fifa world cup", "euro 2024", "euro 2026",
+    "copa america", "nba finals", "nba playoffs",
+    # game-specific jargon
+    "touchdown", "home run", "slam dunk", "hat trick",
     "quarterback", "pitcher", "rebounds", "assists",
-    "strikeouts", "innings", "halftime",
+    "strikeouts", "innings", "halftime", "overtime",
+    "parlay", "moneyline",
+    # match result patterns
+    "will win the match", "win the game", "win the series",
+    "cover the spread",
 ]
 
 
@@ -85,14 +102,15 @@ SPORTS_TITLE_KEYWORDS = [
 
 def _build_kalshi_url(market: dict) -> str:
     """Build a working Kalshi web URL.
-    Kalshi URL format: https://kalshi.com/markets/{event_ticker_lowercase}
-    event_ticker is the correct path segment — series_ticker is the parent series page.
+    Confirmed format: https://kalshi.com/markets/{series_ticker}/{event_ticker}
+    Both lowercase. series_ticker is injected as _series_ticker by fetch_markets_for_series.
     """
+    st = market.get("_series_ticker", "")
     et = market.get("event_ticker", "")
+    if st and et:
+        return f"https://kalshi.com/markets/{st.lower()}/{et.lower()}"
     if et:
         return f"https://kalshi.com/markets/{et.lower()}"
-    # Fallback: use injected series_ticker if event_ticker missing
-    st = market.get("_series_ticker", "")
     if st:
         return f"https://kalshi.com/markets/{st.lower()}"
     return "https://kalshi.com/browse"
@@ -202,9 +220,6 @@ def load_private_key(path: str):
 # REST: market discovery
 # =========================
 
-SPORTS_CATEGORIES = {"Sports", "Esports"}
-
-
 def fetch_non_sports_series(private_key, max_pages: int = 50) -> List[str]:
     """Fetch events, return unique non-sports series_tickers sorted by frequency (most active first)."""
     from collections import Counter
@@ -232,7 +247,7 @@ def fetch_non_sports_series(private_key, max_pages: int = 50) -> List[str]:
 
         for e in events:
             cat = e.get("category", "")
-            if cat not in SPORTS_CATEGORIES:
+            if cat not in BLOCKED_CATEGORIES:
                 st = e.get("series_ticker", "")
                 if st:
                     series_count[st] += 1
@@ -280,8 +295,19 @@ def fetch_markets_for_series(private_key, series_tickers: List[str]) -> List[Dic
     return all_markets
 
 
+def _is_sports_market(ticker: str, title: str) -> bool:
+    """Return True if this market should be excluded as sports/entertainment."""
+    t_upper = ticker.upper()
+    if t_upper.startswith(SPORTS_TICKER_PREFIXES):
+        return True
+    title_lower = title.lower()
+    if any(kw in title_lower for kw in SPORTS_TITLE_KEYWORDS):
+        return True
+    return False
+
+
 def pick_target_tickers(markets: List[Dict[str, Any]]) -> List[str]:
-    """Extract unique tickers from market list."""
+    """Extract unique non-sports tickers from market list."""
     seen = set()
     out = []
     for m in markets:
@@ -292,6 +318,9 @@ def pick_target_tickers(markets: List[Dict[str, Any]]) -> List[str]:
         if status and status not in ("open", "active"):
             continue
         t = str(ticker)
+        title = m.get("title") or m.get("name") or ""
+        if _is_sports_market(t, title):
+            continue
         if t not in seen:
             seen.add(t)
             out.append(t)
