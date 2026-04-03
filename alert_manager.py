@@ -31,12 +31,12 @@ class AlertManager:
 
         # Debug Config
         self.alert_mode = os.getenv("ALERT_MODE", "prod").lower()
-        self.debug_max_per_min = int(os.getenv("DEBUG_MAX_PER_MIN", "3"))
-        self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "50"))
-        self.debug_min_score = float(os.getenv("DEBUG_MIN_SCORE", "30"))
-        self.debug_daily_cap = int(os.getenv("DEBUG_DAILY_CAP", "60"))
-        self.debug_min_gap_sec = int(os.getenv("DEBUG_MIN_GAP_SEC", "30"))
-        self.debug_market_cooldown = int(os.getenv("DEBUG_MARKET_COOLDOWN", "300"))  # 5 min per market
+        self.debug_max_per_min = int(os.getenv("DEBUG_MAX_PER_MIN", "2"))
+        self.debug_min_contracts = int(os.getenv("DEBUG_MIN_CONTRACTS", "100"))
+        self.debug_min_score = float(os.getenv("DEBUG_MIN_SCORE", "45"))
+        self.debug_daily_cap = int(os.getenv("DEBUG_DAILY_CAP", "25"))
+        self.debug_min_gap_sec = int(os.getenv("DEBUG_MIN_GAP_SEC", "120"))
+        self.debug_market_cooldown = int(os.getenv("DEBUG_MARKET_COOLDOWN", "1800"))  # 30 min per market
 
         # Debug State — rate limiting
         self.debug_sent_last_min = 0
@@ -46,8 +46,8 @@ class AlertManager:
 
         # Trade aggregation: collect trades per ticker over a window
         self.AGG_WINDOW = int(os.getenv("DEBUG_AGG_WINDOW", "120"))
-        self.AGG_MIN_TRADES = int(os.getenv("DEBUG_AGG_MIN_TRADES", "2"))
-        self.AGG_MIN_CONTRACTS = int(os.getenv("DEBUG_AGG_MIN_CONTRACTS", "50"))
+        self.AGG_MIN_TRADES = int(os.getenv("DEBUG_AGG_MIN_TRADES", "3"))
+        self.AGG_MIN_CONTRACTS = int(os.getenv("DEBUG_AGG_MIN_CONTRACTS", "100"))
         self._agg_buckets = {}
 
     def _maybe_reset_daily_cap(self):
