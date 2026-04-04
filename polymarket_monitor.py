@@ -39,34 +39,88 @@ MAX_SEEN_HASHES     = 10_000  # cap on dedup set; older half trimmed when hit
 MARKET_PAGE_LIMIT   = 100     # markets per REST page
 MARKET_PAGE_CAP     = 50      # max pages to fetch (50 × 100 = 5,000 markets)
 
-# Categories to exclude (case-insensitive substring match on market.category)
-EXCLUDED_CATEGORIES: Set[str] = {
-    "sports", "esports", "nfl", "nba", "mlb", "nhl", "mls", "ncaa",
-    "soccer", "tennis", "golf", "boxing", "mma", "ufc", "formula 1",
-    "nascar", "olympics", "cricket", "rugby",
-    "entertainment", "awards", "oscars", "grammys", "emmys", "bafta",
-    "celebrity", "reality tv",
-}
+# Categories to exclude — substring match on lowercased category string.
+# This catches "Sports", "Esports", "Sports/Entertainment", etc.
+EXCLUDED_CATEGORY_SUBSTRINGS: tuple = (
+    "sport", "esport", "entertainment", "awards", "celebrity", "reality",
+)
 
-# Keywords in the question title that make a market unactionable for a US trader.
-# Case-insensitive substring match on market.question.
+# Title-level keyword blocklist — any match = skip.
+# Covers every sport and format we don't want.
 EXCLUDED_QUESTION_KEYWORDS: tuple = (
-    # Weather / temperature micro-markets
+    # ── Team sports — all major leagues ────────────────────────────────────
+    # NFL
+    " nfl ", "nfl ", " nfl", "nfl:", "super bowl", "touchdown", "quarterback",
+    "yards passing", "yards rushing", "field goal",
+    # NBA
+    " nba ", "nba ", " nba", "nba:", "nba finals", "nba playoffs",
+    "rebounds", "assists", "three-pointer", "slam dunk",
+    # MLB
+    " mlb ", "mlb ", " mlb", "mlb:", "world series", "home run",
+    "strikeout", "innings", "pitcher", "batting average",
+    # NHL
+    " nhl ", "nhl ", " nhl", "nhl:", "stanley cup", "hat trick", "power play",
+    # MLS / Soccer (all)
+    " mls ", "mls ", "mls:", "premier league", "la liga", "serie a",
+    "bundesliga", "ligue 1", "champions league", "europa league",
+    "copa america", "fifa", "world cup", "euro 2", "concacaf",
+    "o/u ", "over/under",   # match totals — almost always sports
+    # College sports
+    "ncaa", "march madness", "college football", "cfp", "bowl game",
+    # Combat sports
+    "ufc", "boxing match", " mma ", "fight night", "knockout",
+    # Golf
+    "pga tour", "lpga", "masters tournament", "ryder cup", "open championship",
+    # Tennis (all tours)
+    " atp ", " wta ", "wimbledon", "us open tennis", "french open",
+    "australian open", "roland garros", "davis cup",
+    "vs ", # most head-to-head match markets  ← catches "Kessler vs Starodubtseva"
+
+    # ── Match / game result patterns ────────────────────────────────────────
+    "win the match", "win the game", "win the series",
+    "cover the spread", "spread:", "moneyline",
+    ": o/u ", "- o/u ",          # totals markets
+    "game 1 winner", "game 2 winner", "game 3 winner",
+    "set 1", "set 2", "set 3",   # tennis sets
+
+    # ── Specific leagues / tournaments by name ──────────────────────────────
+    "copa colsanitas", "copa sudamericana", "copa libertadores",
+    "champions cup", "carabao cup", "fa cup", "efl ",
+    "spring league", "summer league",
+    "esc challenger", "esl challenger",   # esports
+    "lol:", "league of legends",
+    "dota 2", "valorant match", "cs2:", " cs2 ",
+    "rocket league",
+    "credit one charleston", "miami open", "indian wells",
+    "san luis potosi", "buenos aires open",
+
+    # ── Team name patterns (catches game markets not caught by league names) ─
+    # NBA teams
+    "bulls vs", "knicks vs", "lakers vs", "celtics vs", "warriors vs",
+    "nets vs", "hawks vs", "pacers vs", "raptors vs", "grizzlies vs",
+    "jazz vs", "rockets vs", "clippers vs", "nuggets vs", "suns vs",
+    "heat vs", "bucks vs", "76ers vs", "pistons vs", "timberwolves vs",
+    "vs. bulls", "vs. knicks", "vs. lakers", "vs. celtics", "vs. warriors",
+    "vs. nets", "vs. hawks", "vs. pacers", "vs. raptors", "vs. grizzlies",
+    "vs. jazz", "vs. rockets", "vs. clippers", "vs. nuggets", "vs. suns",
+    "vs. heat", "vs. bucks", "vs. 76ers", "vs. pistons", "vs. timberwolves",
+    # NHL teams
+    "flyers vs", "islanders vs", "rangers vs", "bruins vs", "maple leafs vs",
+    "blackhawks vs", "red wings vs", "penguins vs", "capitals vs",
+    # MLB teams
+    "orioles vs", "pirates vs", "cubs vs", "guardians vs", "reds vs",
+    "rangers vs", "yankees vs", "red sox vs", "dodgers vs", "mets vs",
+    # Soccer clubs
+    "san lorenzo", "estudiantes", "racing club", "independiente",
+    "river plate", "boca juniors", "flamengo", "palmeiras",
+
+    # ── Weather / temperature micro-markets ─────────────────────────────────
     "temperature", "highest temp", "°c", "°f", " celsius", " fahrenheit",
     "rainfall", "precipitation", "humidity", "max temp", "min temp",
     "hottest", "coldest",
-    # Soccer clubs outside US (non-MLS)
-    "millwall", "norwich", "sheffield", "coventry", "ipswich", "burnley",
-    "leeds", "derby", "bristol", "cardiff", "stoke", "blackburn",
-    "middlesbrough", "hull city", "sunderland", "watford", "swansea",
-    "fulham", "brentford", "lazio", "roma", "napoli", "ac milan",
-    "juventus", "inter milan", "atletico", "villarreal", "betis",
-    "sevilla", "porto", "benfica", "ajax", "psv", "feyenoord",
-    "fenerbahce", "galatasaray", "besiktas",
-    # Micro-window crypto up/down (too noisy, too short to act on)
-    "up or down -",   # e.g. "Bitcoin Up or Down - April 3, 12:15AM"
-    "15am-", "30am-", "45am-", "00am-",
-    "15pm-", "30pm-", "45pm-", "00pm-",
+
+    # ── Micro-window crypto up/down ──────────────────────────────────────────
+    "up or down -",
     "15-minute", "30-minute",
 )
 
@@ -146,7 +200,7 @@ def fetch_poly_markets() -> List[Dict[str, Any]]:
 
         for m in batch:
             cat = (m.get("category") or "").lower()
-            if any(ex in cat for ex in EXCLUDED_CATEGORIES):
+            if any(ex in cat for ex in EXCLUDED_CATEGORY_SUBSTRINGS):
                 continue
             # Binary markets only (2 outcomes)
             outcomes = _parse_json_field(m.get("outcomes"), [])

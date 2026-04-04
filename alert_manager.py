@@ -5,6 +5,7 @@ import re
 import time
 from collections import defaultdict
 from ai_reasoning import analyze_trade
+from notion_logger import log_alert as notion_log
 
 CSV_FILE = "alerts_history.csv"
 CSV_HEADERS = [
@@ -131,7 +132,7 @@ class AlertManager:
 
     # ── CSV logging ───────────────────────────────────────────────────────────
 
-    def _log_to_csv(
+    def _log(
         self,
         ticker: str,
         title: str,
@@ -144,7 +145,12 @@ class AlertManager:
         reasons: list,
         link: str,
         analysis: str = "",
+        ts_str: str = "",
     ):
+        """Write to both CSV (local backup) and Notion."""
+        now_str = ts_str or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ── CSV backup ────────────────────────────────────────────────────────
         file_exists = os.path.isfile(CSV_FILE)
         try:
             with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
@@ -152,24 +158,21 @@ class AlertManager:
                 if not file_exists:
                     writer.writerow(CSV_HEADERS)
                 writer.writerow([
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    source,
-                    alert_type,
-                    title,
-                    side,
-                    f"{entry_price}¢",
-                    contracts,
-                    round(score, 1),
-                    _extract_ai_lean(analysis),
-                    " | ".join(reasons),
-                    link,
-                    "",   # Result — fill manually
-                    "",   # Exit Price — fill manually
-                    "",   # P&L — fill manually
-                    "",   # Notes — fill manually
+                    now_str, source, alert_type, title, side,
+                    f"{entry_price}¢", contracts, round(score, 1),
+                    _extract_ai_lean(analysis), " | ".join(reasons), link,
+                    "", "", "", "",
                 ])
         except Exception as e:
             print(f"⚠️ CSV log failed: {e}")
+
+        # ── Notion ────────────────────────────────────────────────────────────
+        notion_log(
+            ticker=ticker, title=title, source=source, alert_type=alert_type,
+            side=side, entry_price=entry_price, contracts=contracts,
+            score=score, reasons=reasons, link=link, analysis=analysis,
+            timestamp_str=now_str,
+        )
 
     # ── Footer ────────────────────────────────────────────────────────────────
 
@@ -223,7 +226,7 @@ class AlertManager:
                 side, entry = yes_label, yes_price
             else:
                 side, entry = no_label, no_price
-            self._log_to_csv(ticker, title, source, "SOLO", side, entry,
+            self._log(ticker, title, source, "SOLO", side, entry,
                              contracts, score, reasons, link, analysis)
 
         self.market_last_alert[ticker] = now
@@ -261,7 +264,7 @@ class AlertManager:
         success = self._send_internal(msg)
         if success:
             lead = markets[0] if markets else cluster_key
-            self._log_to_csv(
+            self._log(
                 lead,
                 f"[CLUSTER] {self.ticker_map.get(lead, cluster_key[:40])}",
                 source, "CLUSTER", "N/A", 0, 0, max_score,
@@ -364,7 +367,7 @@ class AlertManager:
             side, entry = yes_label, latest_yes
         else:
             side, entry = no_label, no_price
-        self._log_to_csv(ticker, title, source, "DEBUG", side, entry,
+        self._log(ticker, title, source, "DEBUG", side, entry,
                          total_contracts, best_score, best_reasons, link, analysis)
 
         del self._agg_buckets[ticker]
