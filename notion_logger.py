@@ -1,12 +1,11 @@
 """
 Notion P&L tracker for Kalshi/Polymarket alerts.
 
-Creates one row per alert in a Notion database.
-The database is auto-created inside the parent page on first run.
+Columns: Market, Timestamp, Source, Side to Buy, Score, AI Lean, Reasons, Link, Result
 
 Env vars:
-  NOTION_TOKEN      — Internal Integration Secret (ntn_...)
-  NOTION_PAGE_ID    — ID of the Notion page the integration has access to
+  NOTION_TOKEN   — Internal Integration Secret (ntn_...)
+  NOTION_PAGE_ID — ID of the Notion page the integration has access to
 """
 
 import logging
@@ -19,12 +18,11 @@ import requests
 
 logger = logging.getLogger("kalshi_monitor")
 
-NOTION_API = "https://api.notion.com/v1"
+NOTION_API     = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
-NOTION_TOKEN = os.getenv("NOTION_TOKEN", "").strip()
+NOTION_TOKEN   = os.getenv("NOTION_TOKEN", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "").strip()
 
-# Cached database ID so we don't search on every alert
 _db_id: Optional[str] = None
 DB_TITLE = "Kalshi & Polymarket Alert Tracker"
 
@@ -38,7 +36,6 @@ def _headers() -> dict:
 
 
 def _find_or_create_db() -> Optional[str]:
-    """Find existing tracker DB under the parent page, or create it."""
     global _db_id
     if _db_id:
         return _db_id
@@ -46,7 +43,7 @@ def _find_or_create_db() -> Optional[str]:
     if not NOTION_TOKEN or not NOTION_PAGE_ID:
         return None
 
-    # Search for existing DB with our title
+    # Search for existing DB
     try:
         r = requests.post(
             f"{NOTION_API}/search",
@@ -55,16 +52,16 @@ def _find_or_create_db() -> Optional[str]:
             timeout=10,
         )
         r.raise_for_status()
-        results = r.json().get("results", [])
-        for db in results:
-            if db.get("title", [{}])[0].get("plain_text", "") == DB_TITLE:
+        for db in r.json().get("results", []):
+            title_parts = db.get("title", [])
+            if title_parts and title_parts[0].get("plain_text", "") == DB_TITLE:
                 _db_id = db["id"]
                 logger.info(f"Notion: found existing DB {_db_id}")
                 return _db_id
     except Exception as e:
         logger.warning(f"Notion search failed: {e}")
 
-    # Create new database
+    # Create DB with simplified schema
     try:
         r = requests.post(
             f"{NOTION_API}/databases",
@@ -74,40 +71,28 @@ def _find_or_create_db() -> Optional[str]:
                 "title": [{"type": "text", "text": {"content": DB_TITLE}}],
                 "icon": {"type": "emoji", "emoji": "📊"},
                 "properties": {
-                    # Title column (required by Notion)
-                    "Market": {"title": {}},
-                    "Timestamp":        {"date": {}},
-                    "Source":           {"select": {"options": [
+                    "Market":      {"title": {}},
+                    "Timestamp":   {"date": {}},
+                    "Source":      {"select": {"options": [
                         {"name": "Kalshi",     "color": "blue"},
                         {"name": "Polymarket", "color": "purple"},
                     ]}},
-                    "Alert Type":       {"select": {"options": [
-                        {"name": "SOLO",    "color": "red"},
-                        {"name": "CLUSTER", "color": "orange"},
-                        {"name": "DEBUG",   "color": "gray"},
+                    "Side to Buy": {"rich_text": {}},
+                    "Score /100":  {"number": {"format": "number"}},
+                    "AI Lean":     {"select": {"options": [
+                        {"name": "Leaning YES",  "color": "green"},
+                        {"name": "Leaning NO",   "color": "red"},
+                        {"name": "Leaning UP",   "color": "green"},
+                        {"name": "Leaning DOWN", "color": "red"},
                     ]}},
-                    "Side to Buy":      {"rich_text": {}},
-                    "Entry Price (¢)":  {"number": {"format": "number"}},
-                    "Contracts":        {"number": {"format": "number"}},
-                    "Score /100":       {"number": {"format": "number"}},
-                    "AI Lean":          {"select": {"options": [
-                        {"name": "Leaning YES", "color": "green"},
-                        {"name": "Leaning NO",  "color": "red"},
-                        {"name": "Leaning UP",  "color": "green"},
-                        {"name": "Leaning DOWN","color": "red"},
-                    ]}},
-                    "Reasons":          {"rich_text": {}},
-                    "Link":             {"url": {}},
-                    # Columns you fill in after resolution
-                    "Result":           {"select": {"options": [
+                    "Reasons":     {"rich_text": {}},
+                    "Link":        {"url": {}},
+                    "Result":      {"select": {"options": [
                         {"name": "WIN",  "color": "green"},
                         {"name": "LOSS", "color": "red"},
                         {"name": "PUSH", "color": "yellow"},
                         {"name": "SKIP", "color": "gray"},
                     ]}},
-                    "Exit Price (¢)":   {"number": {"format": "number"}},
-                    "P&L per contract": {"number": {"format": "number"}},
-                    "Notes":            {"rich_text": {}},
                 },
             },
             timeout=15,
@@ -139,20 +124,16 @@ def log_alert(
     ticker: str,
     title: str,
     source: str,
-    alert_type: str,
+    alert_type: str,  # kept for signature compat, not written to Notion
     side: str,
-    entry_price: int,
-    contracts: int,
+    entry_price: int,  # kept for compat
+    contracts: int,    # kept for compat
     score: float,
     reasons: list,
     link: str,
     analysis: str = "",
     timestamp_str: str = "",
 ) -> bool:
-    """
-    Write one row to the Notion tracker database.
-    Returns True on success, False on failure.
-    """
     if not NOTION_TOKEN:
         return False
 
@@ -160,29 +141,21 @@ def log_alert(
     if not db_id:
         return False
 
-    # Build ISO timestamp
     if not timestamp_str:
         timestamp_str = time.strftime("%Y-%m-%dT%H:%M:%S")
     else:
-        # Convert "2026-04-03 22:18:43" → "2026-04-03T22:18:43"
-        timestamp_str = timestamp_str.replace(" ", "T")
-        # Strip " [Polymarket]" suffix if present
-        timestamp_str = timestamp_str.split(" [")[0]
+        timestamp_str = timestamp_str.replace(" ", "T").split(" [")[0]
 
     lean = _extract_ai_lean(analysis)
-    reasons_text = " | ".join(reasons)
 
     properties: dict = {
-        "Market":           {"title": [{"text": {"content": title[:200]}}]},
-        "Timestamp":        {"date": {"start": timestamp_str}},
-        "Source":           {"select": {"name": source}},
-        "Alert Type":       {"select": {"name": alert_type}},
-        "Side to Buy":      {"rich_text": [{"text": {"content": side[:100]}}]},
-        "Entry Price (¢)":  {"number": entry_price},
-        "Contracts":        {"number": contracts},
-        "Score /100":       {"number": round(score, 1)},
-        "Reasons":          {"rich_text": [{"text": {"content": reasons_text[:2000]}}]},
-        "Link":             {"url": link or None},
+        "Market":      {"title": [{"text": {"content": title[:200]}}]},
+        "Timestamp":   {"date": {"start": timestamp_str}},
+        "Source":      {"select": {"name": source}},
+        "Side to Buy": {"rich_text": [{"text": {"content": side[:100]}}]},
+        "Score /100":  {"number": round(score, 1)},
+        "Reasons":     {"rich_text": [{"text": {"content": " | ".join(reasons)[:2000]}}]},
+        "Link":        {"url": link or None},
     }
 
     if lean:
@@ -198,5 +171,5 @@ def log_alert(
         r.raise_for_status()
         return True
     except Exception as e:
-        logger.warning(f"Notion log_alert failed: {e} — {getattr(e, 'response', None) and e.response.text[:200]}")
+        logger.warning(f"Notion log_alert failed: {e}")
         return False
