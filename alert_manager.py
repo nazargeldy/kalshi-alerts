@@ -185,5 +185,5 @@ class AlertManager:
 
         self.cluster_last_alert[cluster_key] = now
 
-    def process_debug_trade(self, _ticker, _yes_price, _contracts, _volume_proxy, _score, _reasons, _ts_str):
+    def process_debug_trade(self, *args, **kwargs):
         pass  # suppressed — not sent to Telegram or Notion

@@ -381,7 +381,7 @@ async def heartbeat(store: TradeStore, alert_manager, interval_sec: int = 60):
             await asyncio.sleep(interval_sec)
             logger.info(
                 f"❤️ HEARTBEAT | alerts_today={alert_manager.alerts_sent_today}/{alert_manager.daily_cap} "
-                f"| mode={alert_manager.alert_mode}"
+                f"| mode=prod"
             )
         except asyncio.CancelledError:
             break
@@ -536,7 +536,6 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                 await ws.send(json.dumps(sub))
                 if backoff > 1:
                     logger.info("✅ WS reconnected successfully.")
-                    alerter.send("✅ Kalshi monitor reconnected.")
                 backoff = 1  # reset
 
                 async for raw in ws:
