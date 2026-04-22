@@ -1,11 +1,14 @@
 import csv
 import datetime
+import logging
 import os
 import re
 import time
 from collections import defaultdict
 from ai_reasoning import analyze_trade
 from notion_logger import log_alert as notion_log
+
+logger = logging.getLogger("kalshi_monitor")
 
 CSV_FILE = "alerts_history.csv"
 CSV_HEADERS = [
@@ -52,8 +55,8 @@ class AlertManager:
         self.market_last_alert = defaultdict(float)
         self.cluster_last_alert = defaultdict(float)
 
-        self.MARKET_COOLDOWN = 600   # 10 min per market
-        self.CLUSTER_COOLDOWN = 300  # 5 min per cluster
+        self.MARKET_COOLDOWN = 3600  # 1 hour per market
+        self.CLUSTER_COOLDOWN = 1800 # 30 min per cluster
 
     def _maybe_reset_daily_cap(self):
         today = datetime.date.today()
@@ -118,7 +121,24 @@ class AlertManager:
 
         reason_lines = "".join(f"  • {r}\n" for r in reasons)
         analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons, num_trades=1) or ""
+
+        # AI SKIP gate — if Groq says this is junk, suppress the alert
+        if analysis.startswith("SKIP:"):
+            logger.info(f"AI-skipped [{source}] {title[:50]} — {analysis}")
+            self.market_last_alert[ticker] = now  # still set cooldown so we don't retry
+            return
+
         ai_block = f"\n🧠 <b>AI Analysis:</b>\n{analysis}\n" if analysis else ""
+
+        # Determine side from AI lean; fallback to price-based direction
+        lean = _extract_ai_lean(analysis)
+        if lean == "Leaning YES":
+            side = yes_label
+        elif lean == "Leaning NO":
+            side = no_label
+        else:
+            # Heuristic: if price moved up (positive delta implied by high price), follow momentum
+            side = yes_label if yes_price <= 50 else no_label
 
         msg = (
             f"🚨 <b>Unusual Activity — {source}</b>\n"
@@ -128,6 +148,7 @@ class AlertManager:
             f"1. {yes_label} — {yes_price}%\n"
             f"2. {no_label} — {no_price}%\n"
             f"\n"
+            f"📌 <b>Side to watch:</b> {side}\n"
             f"⚡ Score: {score}/100\n"
             f"\n"
             f"📈 <b>Why flagged:</b>\n"
@@ -140,7 +161,6 @@ class AlertManager:
 
         success = self._send_internal(msg)
         if success:
-            side = yes_label if yes_price <= 50 else no_label
             self._log(ticker, title, source, side, score, reasons, link, analysis)
 
         self.market_last_alert[ticker] = now

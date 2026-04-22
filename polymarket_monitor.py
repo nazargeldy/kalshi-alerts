@@ -32,12 +32,13 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API  = "https://data-api.polymarket.com"
 
 # ── Tuning ───────────────────────────────────────────────────────────────────
-POLL_INTERVAL_SEC   = 30      # seconds between trade polls
-MARKET_REFRESH_HOURS = 2.0    # how often to re-fetch the market list
-TRADE_FETCH_LIMIT   = 500     # trades to fetch per poll (newest first)
-MAX_SEEN_HASHES     = 10_000  # cap on dedup set; older half trimmed when hit
-MARKET_PAGE_LIMIT   = 100     # markets per REST page
-MARKET_PAGE_CAP     = 50      # max pages to fetch (50 × 100 = 5,000 markets)
+POLL_INTERVAL_SEC    = 30      # seconds between trade polls
+MARKET_REFRESH_HOURS = 2.0     # how often to re-fetch the market list
+TRADE_FETCH_LIMIT    = 500     # trades to fetch per poll (newest first)
+MAX_SEEN_HASHES      = 10_000  # cap on dedup set; older half trimmed when hit
+MARKET_PAGE_LIMIT    = 100     # markets per REST page
+MARKET_PAGE_CAP      = 50      # max pages to fetch (50 × 100 = 5,000 markets)
+STARTUP_WARMUP_SECS  = 300     # no alerts for first 5 min while baselines build
 
 # Categories to exclude — substring match on lowercased category string.
 # This catches "Sports", "Esports", "Sports/Entertainment", etc.
@@ -74,45 +75,56 @@ EXCLUDED_QUESTION_KEYWORDS: tuple = (
     # Tennis (all tours)
     " atp ", " wta ", "wimbledon", "us open tennis", "french open",
     "australian open", "roland garros", "davis cup",
-    "vs ", # most head-to-head match markets  ← catches "Kessler vs Starodubtseva"
+    "vs ",   # head-to-head: "Team A vs Team B"
+    " vs.",   # head-to-head with period: "Rockets vs. Lakers"
+    " vs ",   # extra space variants
 
     # ── Match / game result patterns ────────────────────────────────────────
-    "win the match", "win the game", "win the series",
+    "win the match", "win the game", "win the series", "win on 20",
     "cover the spread", "spread:", "moneyline",
-    ": o/u ", "- o/u ",          # totals markets
+    ": o/u ", "- o/u ",
     "game 1 winner", "game 2 winner", "game 3 winner",
-    "set 1", "set 2", "set 3",   # tennis sets
+    "set 1", "set 2", "set 3",
 
-    # ── Specific leagues / tournaments by name ──────────────────────────────
+    # ── Specific leagues / tournaments ──────────────────────────────────────
     "copa colsanitas", "copa sudamericana", "copa libertadores",
     "champions cup", "carabao cup", "fa cup", "efl ",
     "spring league", "summer league",
-    "esc challenger", "esl challenger",   # esports
+    "esc challenger", "esl challenger",
     "lol:", "league of legends",
     "dota 2", "valorant match", "cs2:", " cs2 ",
     "rocket league",
     "credit one charleston", "miami open", "indian wells",
     "san luis potosi", "buenos aires open",
 
-    # ── Team name patterns (catches game markets not caught by league names) ─
-    # NBA teams
-    "bulls vs", "knicks vs", "lakers vs", "celtics vs", "warriors vs",
-    "nets vs", "hawks vs", "pacers vs", "raptors vs", "grizzlies vs",
-    "jazz vs", "rockets vs", "clippers vs", "nuggets vs", "suns vs",
-    "heat vs", "bucks vs", "76ers vs", "pistons vs", "timberwolves vs",
-    "vs. bulls", "vs. knicks", "vs. lakers", "vs. celtics", "vs. warriors",
-    "vs. nets", "vs. hawks", "vs. pacers", "vs. raptors", "vs. grizzlies",
-    "vs. jazz", "vs. rockets", "vs. clippers", "vs. nuggets", "vs. suns",
-    "vs. heat", "vs. bucks", "vs. 76ers", "vs. pistons", "vs. timberwolves",
-    # NHL teams
-    "flyers vs", "islanders vs", "rangers vs", "bruins vs", "maple leafs vs",
-    "blackhawks vs", "red wings vs", "penguins vs", "capitals vs",
-    # MLB teams
-    "orioles vs", "pirates vs", "cubs vs", "guardians vs", "reds vs",
-    "rangers vs", "yankees vs", "red sox vs", "dodgers vs", "mets vs",
+    # ── MLB team names (standalone — catches without "vs") ───────────────────
+    "cardinals", "marlins", "braves", "phillies", "mariners", "padres",
+    "brewers", "astros", "rockies", "rays", "pirates", "blue jays",
+    "diamondbacks", "royals", "yankees", "red sox", "dodgers", "mets",
+    "orioles", "cubs", "guardians", "reds", "rangers", "giants",
+    "nationals", "athletics", "twins", "tigers", "white sox", "angels",
+    # NHL team names
+    "maple leafs", "blackhawks", "red wings", "penguins", "capitals",
+    "flyers", "islanders", "bruins", "oilers", "canucks", "avalanche",
+    "flames", "senators", "predators", "blues", "wild", "coyotes",
+    "ducks", "sharks", "kings", "golden knights",
+    # NBA team names
+    "celtics", "lakers", "warriors", "bucks", "76ers", "suns",
+    "clippers", "nuggets", "heat", "knicks", "nets", "hawks",
+    "raptors", "grizzlies", "jazz", "timberwolves", "spurs",
+    "trail blazers", "thunder", "magic", "pistons", "hornets",
     # Soccer clubs
     "san lorenzo", "estudiantes", "racing club", "independiente",
     "river plate", "boca juniors", "flamengo", "palmeiras",
+    "manchester ", "arsenal ", "liverpool ", "chelsea ", "barcelona",
+    "real madrid", "juventus", "inter milan", "ac milan", "atletico",
+    "borussia ", "ajax ", "psv ", "porto ", "benfica",
+
+    # ── Social media trivia / entertainment ─────────────────────────────────
+    "elon musk post", "tweet", "tweets from", "post between",
+    "mrbeast", "mr beast", "bachelorette", "bachelor ", "survivor ",
+    "american idol", "the voice ", "dancing with",
+    "followers", "subscribers", "views on day 1",
 
     # ── Weather / temperature micro-markets ─────────────────────────────────
     "temperature", "highest temp", "°c", "°f", " celsius", " fahrenheit",
@@ -247,9 +259,14 @@ def build_poly_maps(
 
         title    = m.get("question") or m.get("title") or cid[:20]
         slug     = m.get("slug") or ""
-        evt_slug = m.get("groupItemTitle") or slug  # best event-level slug available
 
-        url = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+        # Use the parent event slug (from the events array) for the URL.
+        # The market slug (e.g. "will-btc-hit-80k-april-21-346") differs from
+        # the event slug ("when-will-bitcoin-hit-80k") — only the event slug works.
+        events_raw = _parse_json_field(m.get("events"), [])
+        evt_slug = (events_raw[0].get("slug") or slug) if events_raw else slug
+
+        url = f"https://polymarket.com/event/{evt_slug}" if evt_slug else "https://polymarket.com"
 
         outcomes = _parse_json_field(m.get("outcomes"), ["Yes", "No"])
         prices   = _parse_json_field(m.get("outcomePrices"), ["0.5", "0.5"])
@@ -332,6 +349,7 @@ async def poly_trade_loop(alert_manager) -> None:
     clusters               = MarketClusterTracker(window_seconds=300)
     seen_hashes: Set[str]  = set()
     last_market_refresh    = time.time()
+    startup_time           = time.time()
     poll_count             = 0
 
     while True:
@@ -424,8 +442,9 @@ async def poly_trade_loop(alert_manager) -> None:
                 ts_str=f"{ts_str} [Polymarket]",
             )
 
-            # Production alert
-            if score_result["score"] >= 50:
+            # Production alert — skip during warmup period to let baselines build
+            in_warmup = (time.time() - startup_time) < STARTUP_WARMUP_SECS
+            if score_result["score"] >= 50 and not in_warmup:
                 logger.info(
                     f"POLY HIGH SCORE {score_result['score']} | "
                     f"{ticker_map.get(cid, cid[:20])} | {score_result['reasons']}"

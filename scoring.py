@@ -57,21 +57,22 @@ def score_trade(
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
 
     # 2) Burst (1m trade count vs 60m average rate)
+    # Only score burst when we have real history (t60 >= 3); otherwise the
+    # 0.5/min floor manufactures a fake spike on service restart.
     t1 = baselines.get("trades_1m", 0)
     t60 = baselines.get("trades_60m", 0)
-    # Floor at 0.5 trades/min (i.e. 1 per 2 min) for quiet markets
-    avg_per_min = max(t60 / 60, 0.5)
-    burst = t1 / avg_per_min
-
-    if burst >= 10:
-        score += 25
-        reasons.append(f"{burst:.0f}x spike in trade frequency")
-    elif burst >= 6:
-        score += 18
-        reasons.append(f"{burst:.0f}x spike in trade frequency")
-    elif burst >= 3:
-        score += 10
-        reasons.append(f"{burst:.0f}x spike in trade frequency")
+    if t60 >= 3:
+        avg_per_min = max(t60 / 60, 0.5)
+        burst = t1 / avg_per_min
+        if burst >= 10:
+            score += 25
+            reasons.append(f"{burst:.0f}x spike in trade frequency")
+        elif burst >= 6:
+            score += 18
+            reasons.append(f"{burst:.0f}x spike in trade frequency")
+        elif burst >= 3:
+            score += 10
+            reasons.append(f"{burst:.0f}x spike in trade frequency")
 
     # 3) Short-dated urgency
     if hours_to_close is not None:
@@ -136,7 +137,19 @@ def score_trade(
         side = "YES" if yes_price_cents <= 50 else "NO"
         reasons.append(f"Skewed odds: {side} at {yes_price_cents}¢")
 
+    # Gate: require at least one real anomaly signal (z-score, burst, or price
+    # momentum) before the score can reach alert threshold. This prevents
+    # cold-start false positives where only size + short-dated + conviction
+    # stack up without any baseline comparison.
+    has_real_signal = any(
+        "z-score" in r or "spike in trade" in r or "Price moved" in r
+        for r in reasons
+    )
+    final = min(score, 100)
+    if not has_real_signal:
+        final = min(final, 45)  # cap below alert threshold until baselines warm up
+
     return {
-        "score": min(score, 100),
+        "score": final,
         "reasons": reasons,
     }
