@@ -485,7 +485,7 @@ async def poly_trade_loop(alert_manager) -> None:
 
             # Production alert — skip during warmup period to let baselines build
             in_warmup = (time.time() - startup_time) < STARTUP_WARMUP_SECS
-            if score_result["score"] >= 50 and not in_warmup:
+            if score_result["score"] >= 80 and not in_warmup:
                 logger.info(
                     f"POLY HIGH SCORE {score_result['score']} "
                     f"[hits={score_result.get('anomaly_hits',0)}] | "

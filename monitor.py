@@ -608,7 +608,7 @@ async def ws_listen_trades(private_key, market_tickers: List[str], store: TradeS
                             ts_str=ts_str
                         )
                         
-                        if score_result["score"] >= 50:
+                        if score_result["score"] >= 80:
                              logger.info(f"⚠️ HIGH SCORE {score_result['score']} | {trade.market_ticker} | {score_result['reasons']}")
                              
                              # 1. Attempt Solo Alert (Requires Production Thresholds)

@@ -106,7 +106,7 @@ class AlertManager:
         return f"🔗 <a href='{link}'>Trade on Kalshi</a>"
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
-        if score < 50:
+        if score < 80:
             return
 
         now = time.time()
@@ -166,8 +166,8 @@ class AlertManager:
         self.market_last_alert[ticker] = now
 
     def process_cluster_alert(self, cluster_key: str, count: int, max_score: float, markets: list):
-        is_tier_1 = (max_score >= 65 and count >= 2)
-        is_tier_2 = (max_score >= 50 and count >= 3)
+        is_tier_1 = (max_score >= 80 and count >= 2)
+        is_tier_2 = (max_score >= 80 and count >= 3)
         if not (is_tier_1 or is_tier_2):
             return
 
