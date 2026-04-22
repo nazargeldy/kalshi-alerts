@@ -21,7 +21,7 @@ import logging
 import sqlite3
 import time
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
@@ -193,7 +193,7 @@ def record_trade(
     }
 
 
-def get_wallet_score(stats: Dict[str, Any]) -> tuple[int, str]:
+def get_wallet_score(stats: Dict[str, Any]) -> Tuple[int, str]:
     """
     Return (extra_points, reason_string) for a wallet.
     Points are added to the anomaly score in scoring.py.
