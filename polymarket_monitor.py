@@ -13,17 +13,19 @@ Architecture:
 """
 
 import asyncio
+import collections
 import datetime
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import requests
 
 from baselines import MarketBaselines
 from clustering import MarketClusterTracker
 from scoring import score_trade
+from wallet_tracker import init_db as wallet_db_init, record_trade as wallet_record, get_wallet_score
 
 logger = logging.getLogger("kalshi_monitor")
 
@@ -327,6 +329,13 @@ async def poly_trade_loop(alert_manager) -> None:
     """
     logger.info("Polymarket monitor starting — fetching markets...")
 
+    # Init wallet tracker DB (no-op if already exists)
+    try:
+        wallet_db_init()
+        logger.info("Wallet tracker DB ready.")
+    except Exception as e:
+        logger.warning(f"Wallet tracker DB init failed: {e}")
+
     # ── Initial market discovery ──────────────────────────────────────────
     loop = asyncio.get_event_loop()
     try:
@@ -351,6 +360,12 @@ async def poly_trade_loop(alert_manager) -> None:
     last_market_refresh    = time.time()
     startup_time           = time.time()
     poll_count             = 0
+
+    # VPIN: rolling 50-trade order-flow window per market
+    # deque entries: (yes_volume, no_volume) where volume = contracts
+    order_flow: Dict[str, Deque] = collections.defaultdict(
+        lambda: collections.deque(maxlen=50)
+    )
 
     while True:
         await asyncio.sleep(POLL_INTERVAL_SEC)
@@ -402,6 +417,40 @@ async def poly_trade_loop(alert_manager) -> None:
             now_ms = int(time.time() * 1000)
             ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+            # ── VPIN: track order-flow direction ─────────────────────────
+            side        = (trade.get("side") or "BUY").upper()
+            outcome_idx = int(trade.get("outcomeIndex") or 0)
+            # YES-side volume: buying YES or selling NO
+            is_yes_flow = (side == "BUY" and outcome_idx == 0) or \
+                          (side == "SELL" and outcome_idx == 1)
+            yes_vol = contracts if is_yes_flow else 0
+            no_vol  = contracts if not is_yes_flow else 0
+            order_flow[cid].append((yes_vol, no_vol))
+
+            of_window = order_flow[cid]
+            if len(of_window) >= 10:
+                tot_yes = sum(y for y, n in of_window)
+                tot_no  = sum(n for y, n in of_window)
+                total   = tot_yes + tot_no
+                vpin    = abs(tot_yes - tot_no) / max(total, 1)
+            else:
+                vpin = 0.0
+
+            # ── Wallet reputation ─────────────────────────────────────────
+            wallet    = trade.get("proxyWallet", "")
+            size_usd  = float(trade.get("size", 0) or 0) * float(trade.get("price", 0.5) or 0.5)
+            w_score   = 0
+            w_reason  = ""
+            if wallet:
+                try:
+                    w_stats          = await loop.run_in_executor(
+                        None, wallet_record, wallet, cid, side, outcome_idx, size_usd,
+                        float(trade.get("price", 0.5) or 0.5)
+                    )
+                    w_score, w_reason = get_wallet_score(w_stats)
+                except Exception:
+                    pass
+
             # Update baselines
             baselines.update(
                 market_ticker=cid,
@@ -422,31 +471,25 @@ async def poly_trade_loop(alert_manager) -> None:
                     continue  # market already closed
                 hours_to_close = max((ct - now_utc).total_seconds() / 3600, 0)
 
-            # Score
+            # Score (now includes VPIN + wallet signals)
             score_result = score_trade(
                 volume_proxy,
                 snap,
                 hours_to_close,
                 yes_price_cents=yes_price_cents,
                 contracts=contracts,
-            )
-
-            # Debug mode alert (low threshold, aggregated)
-            alert_manager.process_debug_trade(
-                ticker=cid,
-                yes_price=yes_price_cents,
-                contracts=contracts,
-                volume_proxy=volume_proxy,
-                score=score_result["score"],
-                reasons=score_result["reasons"],
-                ts_str=f"{ts_str} [Polymarket]",
+                vpin=vpin,
+                wallet_score=w_score,
+                wallet_reason=w_reason,
             )
 
             # Production alert — skip during warmup period to let baselines build
             in_warmup = (time.time() - startup_time) < STARTUP_WARMUP_SECS
             if score_result["score"] >= 50 and not in_warmup:
                 logger.info(
-                    f"POLY HIGH SCORE {score_result['score']} | "
+                    f"POLY HIGH SCORE {score_result['score']} "
+                    f"[hits={score_result.get('anomaly_hits',0)}] | "
+                    f"VPIN={vpin:.2f} | wallet={w_score}pts | "
                     f"{ticker_map.get(cid, cid[:20])} | {score_result['reasons']}"
                 )
 

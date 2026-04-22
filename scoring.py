@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
+
 
 def score_trade(
     volume_proxy: float,
@@ -6,26 +7,39 @@ def score_trade(
     hours_to_close: Optional[float] = None,
     yes_price_cents: int = 50,
     contracts: int = 0,
+    vpin: float = 0.0,
+    wallet_score: int = 0,
+    wallet_reason: str = "",
 ) -> Dict[str, Any]:
     """
     Score a trade 0-100 for anomaly/insider-like activity.
 
-    Components:
-      0) Raw contract count (cold-start safe)         — up to 15 pts
-      1) Size shock (z-score vs 24h median/MAD)       — up to 40 pts
-      2) Burst (1m count vs 60m average)              — up to 25 pts
-      3) Short-dated (hours until market close)        — up to 20 pts
-      4) Absolute volume gate                          — up to 20 pts
-      5) Price momentum (5m / 60m price delta)         — up to 20 pts
-      6) Conviction (asymmetric price = high risk/reward) — up to 15 pts
+    Anomaly signals (tracked for 3-signal gate):
+      A) Size shock   — z-score vs 24h baseline
+      B) Burst        — 1m trade frequency spike
+      C) Momentum     — price delta in 5m or 60m window
+      D) VPIN         — order-flow imbalance (one-sided buying ≥ 0.65)
+      E) Wallet       — fresh whale or known high-win-rate actor
 
-    Max theoretical raw = 155; capped to 100.
+    Context signals (don't count toward 3-signal gate):
+      F) Short-dated  — hours until resolution
+      G) Volume gate  — absolute dollar volume
+      H) Conviction   — asymmetric yes_price
+
+    Gate rule: score is capped at 45 (below alert threshold) unless
+    at least 2 of {A,B,C,D,E} trigger. At 3+ the full score is allowed.
+    This prevents cold-start false positives from F+G+H stacking alone.
     """
     score = 0
-    reasons = []
+    reasons: List[str] = []
 
-    # 0) Raw contract count — works immediately, no baseline needed
-    # volume_proxy = contracts * yes_price_cents, so derive contracts if not passed
+    # Track which anomaly signal categories fired
+    anomaly_hits = 0  # incremented for A–E
+
+    # ── H) Conviction (evaluated early for cold-start contract scoring) ────────
+    # Separate from the main conviction block below — used only for context.
+
+    # ── Raw contract count (cold-start safe, not an anomaly signal) ───────────
     effective_contracts = contracts
     if effective_contracts <= 0 and yes_price_cents > 0:
         effective_contracts = int(volume_proxy / yes_price_cents)
@@ -40,26 +54,27 @@ def score_trade(
         score += 5
         reasons.append(f"Notable order: {effective_contracts:,} contracts")
 
-    # 1) Size shock (z-score vs 24h median/MAD)
+    # ── A) Size shock (z-score vs 24h median/MAD) ─────────────────────────────
     median = baselines.get("median_24h")
-    mad = baselines.get("mad_24h")
-
+    mad    = baselines.get("mad_24h")
     if median is not None and mad is not None and mad > 0:
         z = (volume_proxy - median) / (1.4826 * mad + 1)
         if z >= 8:
             score += 40
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
+            anomaly_hits += 1
         elif z >= 5:
             score += 25
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
+            anomaly_hits += 1
         elif z >= 3:
             score += 10
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
+            anomaly_hits += 1
 
-    # 2) Burst (1m trade count vs 60m average rate)
-    # Only score burst when we have real history (t60 >= 3); otherwise the
-    # 0.5/min floor manufactures a fake spike on service restart.
-    t1 = baselines.get("trades_1m", 0)
+    # ── B) Burst (1m trade count vs 60m average) ──────────────────────────────
+    # Only when we have real history — fake floor causes startup false positives
+    t1  = baselines.get("trades_1m", 0)
     t60 = baselines.get("trades_60m", 0)
     if t60 >= 3:
         avg_per_min = max(t60 / 60, 0.5)
@@ -67,16 +82,22 @@ def score_trade(
         if burst >= 10:
             score += 25
             reasons.append(f"{burst:.0f}x spike in trade frequency")
+            anomaly_hits += 1
         elif burst >= 6:
             score += 18
             reasons.append(f"{burst:.0f}x spike in trade frequency")
+            anomaly_hits += 1
         elif burst >= 3:
             score += 10
             reasons.append(f"{burst:.0f}x spike in trade frequency")
+            anomaly_hits += 1
 
-    # 3) Short-dated urgency
+    # ── F) Short-dated urgency ─────────────────────────────────────────────────
     if hours_to_close is not None:
-        if hours_to_close <= 2:
+        if hours_to_close <= 0.167:        # ≤ 10 minutes — last-minute rush
+            score += 30
+            reasons.append("Resolves in <10 minutes — last-minute rush")
+        elif hours_to_close <= 2:
             score += 20
             reasons.append("Closes within 2 hours")
         elif hours_to_close <= 24:
@@ -89,7 +110,7 @@ def score_trade(
             score += 4
             reasons.append("Closes within 7 days")
 
-    # 4) Absolute volume gate (volume_proxy = contracts * yes_price_cents)
+    # ── G) Absolute volume gate ────────────────────────────────────────────────
     if volume_proxy >= 250_000:
         score += 20
         reasons.append(f"Very large trade volume (${volume_proxy/100:,.0f})")
@@ -100,30 +121,53 @@ def score_trade(
         score += 8
         reasons.append(f"Elevated trade volume (${volume_proxy/100:,.0f})")
 
-    # 5) Price momentum — large price move coinciding with volume = informed flow
-    pd5 = baselines.get("price_delta_5m")
+    # ── C) Price momentum ─────────────────────────────────────────────────────
+    pd5  = baselines.get("price_delta_5m")
     pd60 = baselines.get("price_delta_60m")
-    best_delta = 0
+    best_delta  = 0
     delta_window = ""
-    if pd5 is not None and abs(pd5) > best_delta:
-        best_delta = abs(pd5)
+    if pd5  is not None and abs(pd5)  > best_delta:
+        best_delta   = abs(pd5)
         delta_window = "5m"
     if pd60 is not None and abs(pd60) > best_delta:
-        best_delta = abs(pd60)
+        best_delta   = abs(pd60)
         delta_window = "60m"
 
     if best_delta >= 25:
         score += 20
         reasons.append(f"Price moved {best_delta:+d}¢ in {delta_window}")
+        anomaly_hits += 1
     elif best_delta >= 15:
         score += 14
         reasons.append(f"Price moved {best_delta:+d}¢ in {delta_window}")
+        anomaly_hits += 1
     elif best_delta >= 8:
         score += 8
         reasons.append(f"Price moved {best_delta:+d}¢ in {delta_window}")
+        # partial — don't count as a full anomaly hit
 
-    # 6) Conviction — trading at extreme odds signals high confidence
-    # Extreme: ≤10¢ or ≥90¢  |  Strong: ≤20¢ or ≥80¢  |  Skewed: ≤30¢ or ≥70¢
+    # ── D) VPIN — order-flow imbalance ────────────────────────────────────────
+    if vpin >= 0.85:
+        score += 20
+        reasons.append(f"Extreme order-flow imbalance (VPIN={vpin:.2f}) — one-sided buying")
+        anomaly_hits += 1
+    elif vpin >= 0.70:
+        score += 12
+        reasons.append(f"High order-flow imbalance (VPIN={vpin:.2f})")
+        anomaly_hits += 1
+    elif vpin >= 0.60:
+        score += 6
+        reasons.append(f"Elevated order-flow imbalance (VPIN={vpin:.2f})")
+        # partial
+
+    # ── E) Wallet reputation ──────────────────────────────────────────────────
+    if wallet_score > 0 and wallet_reason:
+        score += wallet_score
+        reasons.append(wallet_reason)
+        if wallet_score >= 8:
+            anomaly_hits += 1
+
+    # ── H) Conviction ────────────────────────────────────────────────────────
     if yes_price_cents <= 10 or yes_price_cents >= 90:
         score += 15
         side = "YES" if yes_price_cents <= 10 else "NO"
@@ -137,19 +181,20 @@ def score_trade(
         side = "YES" if yes_price_cents <= 50 else "NO"
         reasons.append(f"Skewed odds: {side} at {yes_price_cents}¢")
 
-    # Gate: require at least one real anomaly signal (z-score, burst, or price
-    # momentum) before the score can reach alert threshold. This prevents
-    # cold-start false positives where only size + short-dated + conviction
-    # stack up without any baseline comparison.
-    has_real_signal = any(
-        "z-score" in r or "spike in trade" in r or "Price moved" in r
-        for r in reasons
-    )
-    final = min(score, 100)
-    if not has_real_signal:
-        final = min(final, 45)  # cap below alert threshold until baselines warm up
+    # ── 3-signal gate ─────────────────────────────────────────────────────────
+    # Require at least 2 anomaly signals (A–E) before any alert fires;
+    # 3+ lifts the cap entirely. This prevents pure "big+short+conviction"
+    # cold-start stacks from crossing the 50-point alert threshold.
+    raw = min(score, 100)
+    if anomaly_hits < 2:
+        final = min(raw, 45)   # hard block — no alert
+    elif anomaly_hits == 2:
+        final = min(raw, 72)   # allow moderate alerts
+    else:
+        final = raw             # 3+ signals: full score
 
     return {
-        "score": final,
-        "reasons": reasons,
+        "score":         final,
+        "reasons":       reasons,
+        "anomaly_hits":  anomaly_hits,
     }
