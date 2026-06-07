@@ -167,17 +167,23 @@ def score_trade(
         if wallet_score >= 8:
             anomaly_hits += 1
 
-    # ── H) Conviction ────────────────────────────────────────────────────────
+    # ── H) Conviction (INVERTED from data: cheap longshots LOSE) ─────────────
+    # Backtest of 460 resolved alerts:
+    #   extreme_conviction (≤10¢ / ≥90¢) → 7.4% win rate (was +15)
+    #   high_conviction    (≤20¢ / ≥80¢) → 16.3% win rate (was +10)
+    #   skewed_odds        (≤30¢ / ≥70¢) → 22.8% win rate (was +5)
+    # Inverting: these tags now SUBTRACT from score so they push longshot
+    # alerts below the 80-point alert threshold instead of stacking them over.
     if yes_price_cents <= 10 or yes_price_cents >= 90:
-        score += 15
+        score -= 15
         side = "YES" if yes_price_cents <= 10 else "NO"
-        reasons.append(f"Extreme conviction: {side} at {yes_price_cents}¢")
+        reasons.append(f"Longshot penalty: {side} at {yes_price_cents}¢ (hist 7% wr)")
     elif yes_price_cents <= 20 or yes_price_cents >= 80:
-        score += 10
+        score -= 5
         side = "YES" if yes_price_cents <= 50 else "NO"
-        reasons.append(f"High conviction: {side} at {yes_price_cents}¢")
+        reasons.append(f"Cheap-side penalty: {side} at {yes_price_cents}¢ (hist 16% wr)")
     elif yes_price_cents <= 30 or yes_price_cents >= 70:
-        score += 5
+        # Neutral — used to be +5, now 0. Keep as informational tag.
         side = "YES" if yes_price_cents <= 50 else "NO"
         reasons.append(f"Skewed odds: {side} at {yes_price_cents}¢")
 

@@ -156,6 +156,10 @@ def log_alert(
         "Score /100":  {"number": round(score, 1)},
         "Reasons":     {"rich_text": [{"text": {"content": " | ".join(reasons)[:2000]}}]},
         "Link":        {"url": link or None},
+        # Real entry price (cents) and contract count so future P&L is computable
+        # without parsing the Reasons text. Skip when caller didn't pass a value (0).
+        "Entry Price (cents)": {"number": int(entry_price) if entry_price else None},
+        "Contracts":           {"number": int(contracts)   if contracts   else None},
     }
 
     if lean:

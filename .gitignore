@@ -21,3 +21,9 @@ env/
 .idea/
 logs/
 *.db-*
+
+# Runtime artifacts
+accuracy_stats.json
+resolve.log
+*.log
+alerts_history.csv

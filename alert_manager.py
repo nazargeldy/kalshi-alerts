@@ -10,6 +10,21 @@ from notion_logger import log_alert as notion_log
 
 logger = logging.getLogger("kalshi_monitor")
 
+# Markets in this category have produced 2% win rate / -90% ROI over the last 60d
+# (n=86 priced rows, n=197 of 460 resolved overall). Filter them out at the
+# alert-manager layer — same keyword set as auto_resolve._market_category.
+GEOPOL_KEYWORDS = (
+    "iran", "russia", "ukraine", "israel", "china",
+    "hormuz", "hezbollah", "nato", "military", "war",
+    "ceasefire", "airspace", "kharg", "blockade",
+)
+_GEOPOL_RE = re.compile(r"\b(" + "|".join(GEOPOL_KEYWORDS) + r")\b", re.I)
+
+
+def _is_geopolitical(title: str) -> bool:
+    return bool(_GEOPOL_RE.search(title or ""))
+
+
 CSV_FILE = "alerts_history.csv"
 CSV_HEADERS = [
     "Timestamp",   # when the alert fired
@@ -79,9 +94,18 @@ class AlertManager:
             print(f"ALERT FAILED: {msg[:80]}")
         return success
 
-    def _log(self, ticker, title, source, side, score, reasons, link, analysis="", ts_str=""):
+    def _log(self, ticker, title, source, side, score, reasons, link,
+             analysis="", ts_str="", entry_price=0, contracts=0):
         now_str = ts_str or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lean = _extract_ai_lean(analysis)
+
+        # Resolve the actual cents the alert is "buying at" given the side.
+        # `entry_price` arg is the YES price (0-100¢). If side is the NO label,
+        # the contract you're buying costs (100 - yes_price).
+        side_is_no = isinstance(side, str) and (
+            "❌" in side or any(k in side.lower() for k in ("no", "down", "low", "below", "under"))
+        )
+        entry_cents = (100 - int(entry_price)) if (side_is_no and entry_price) else int(entry_price or 0)
 
         # CSV backup
         file_exists = os.path.isfile(CSV_FILE)
@@ -95,10 +119,11 @@ class AlertManager:
         except Exception as e:
             print(f"⚠️ CSV log failed: {e}")
 
-        # Notion
+        # Notion — now logs real entry price (cents) and contract count
         notion_log(ticker=ticker, title=title, source=source, alert_type="SOLO",
-                   side=side, entry_price=0, contracts=0, score=score,
-                   reasons=reasons, link=link, analysis=analysis, timestamp_str=now_str)
+                   side=side, entry_price=entry_cents, contracts=int(contracts or 0),
+                   score=score, reasons=reasons, link=link, analysis=analysis,
+                   timestamp_str=now_str)
 
     def _build_footer(self, ticker: str, link: str) -> str:
         if _is_polymarket_ticker(ticker):
@@ -114,6 +139,13 @@ class AlertManager:
             return
 
         title    = self.ticker_map.get(ticker, ticker[:40])
+
+        # Geopolitical filter — 2% historical win rate, -90% ROI. Suppress entirely.
+        if _is_geopolitical(title):
+            logger.info(f"GEO-skip [solo]: {title[:60]}")
+            self.market_last_alert[ticker] = now  # set cooldown so we don't retry
+            return
+
         no_price = 100 - yes_price
         link     = self.link_map.get(ticker, "https://kalshi.com/browse")
         yes_label, no_label = self.option_labels_map.get(ticker, ("✅ Yes", "❌ No"))
@@ -140,6 +172,25 @@ class AlertManager:
             # Heuristic: if price moved up (positive delta implied by high price), follow momentum
             side = yes_label if yes_price <= 50 else no_label
 
+        # ── Cheap-YES guardrail ──────────────────────────────────────────────
+        # Last 60d: YES bets at any price won 20.9% (n=401); the cheapest YES
+        # bets (≤25¢) are the largest losing pool. Only let a cheap-YES alert
+        # through if BOTH (a) the AI explicitly leans YES and (b) at least one
+        # real corroborating signal fired (real price momentum, or strong VPIN
+        # imbalance). Otherwise suppress.
+        if side == yes_label and yes_price <= 25:
+            reasons_text = " | ".join(reasons).lower()
+            has_momentum  = "price moved" in reasons_text
+            has_high_vpin = ("extreme order-flow" in reasons_text
+                             or "high order-flow"   in reasons_text)
+            if not (lean == "Leaning YES" and (has_momentum or has_high_vpin)):
+                logger.info(
+                    f"CHEAP-YES-skip [solo]: {title[:55]} | yes={yes_price}c "
+                    f"lean={lean or 'none'!r} momentum={has_momentum} vpin={has_high_vpin}"
+                )
+                self.market_last_alert[ticker] = now
+                return
+
         msg = (
             f"🚨 <b>Unusual Activity — {source}</b>\n"
             f"\n"
@@ -161,7 +212,8 @@ class AlertManager:
 
         success = self._send_internal(msg)
         if success:
-            self._log(ticker, title, source, side, score, reasons, link, analysis)
+            self._log(ticker, title, source, side, score, reasons, link, analysis,
+                      entry_price=yes_price, contracts=contracts)
 
         self.market_last_alert[ticker] = now
 
@@ -174,6 +226,14 @@ class AlertManager:
         now = time.time()
         if now - self.cluster_last_alert[cluster_key] < self.CLUSTER_COOLDOWN:
             return
+
+        # Geopolitical filter — skip the whole cluster if any constituent market matches.
+        for t in markets:
+            t_title = self.ticker_map.get(t, t[:40])
+            if _is_geopolitical(t_title):
+                logger.info(f"GEO-skip [cluster {cluster_key}]: contains {t_title[:50]}")
+                self.cluster_last_alert[cluster_key] = now
+                return
 
         tier_label = "HIGH" if is_tier_1 else "MODERATE"
         source = "Polymarket" if cluster_key.startswith("POLY:") else "Kalshi"
