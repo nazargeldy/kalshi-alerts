@@ -35,6 +35,8 @@ def score_trade(
 
     # Track which anomaly signal categories fired
     anomaly_hits = 0  # incremented for A–E
+    hit_size_shock = False  # A — z-score
+    hit_burst      = False  # B — trade-frequency spike
 
     # ── H) Conviction (evaluated early for cold-start contract scoring) ────────
     # Separate from the main conviction block below — used only for context.
@@ -44,14 +46,18 @@ def score_trade(
     if effective_contracts <= 0 and yes_price_cents > 0:
         effective_contracts = int(volume_proxy / yes_price_cents)
 
+    # ── Raw contract count weights (DROPPED from +15/+10/+5 → +5/+3/+2) ──
+    # Backtest of 460 resolved alerts: whale_order (>=2000) won only 17.2%
+    # (n=128) — these are usually hedges or exit liquidity, not informed
+    # conviction. Keep the tag for context but stop letting it stack score.
     if effective_contracts >= 2000:
-        score += 15
+        score += 5
         reasons.append(f"Whale order: {effective_contracts:,} contracts")
     elif effective_contracts >= 750:
-        score += 10
+        score += 3
         reasons.append(f"Large order: {effective_contracts:,} contracts")
     elif effective_contracts >= 250:
-        score += 5
+        score += 2
         reasons.append(f"Notable order: {effective_contracts:,} contracts")
 
     # ── A) Size shock (z-score vs 24h median/MAD) ─────────────────────────────
@@ -62,15 +68,15 @@ def score_trade(
         if z >= 8:
             score += 40
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
-            anomaly_hits += 1
+            anomaly_hits += 1; hit_size_shock = True
         elif z >= 5:
             score += 25
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
-            anomaly_hits += 1
+            anomaly_hits += 1; hit_size_shock = True
         elif z >= 3:
             score += 10
             reasons.append(f"Trade size {z:.1f}x above normal (z-score)")
-            anomaly_hits += 1
+            anomaly_hits += 1; hit_size_shock = True
 
     # ── B) Burst (1m trade count vs 60m average) ──────────────────────────────
     # Only when we have real history — fake floor causes startup false positives
@@ -82,17 +88,20 @@ def score_trade(
         if burst >= 10:
             score += 25
             reasons.append(f"{burst:.0f}x spike in trade frequency")
-            anomaly_hits += 1
+            anomaly_hits += 1; hit_burst = True
         elif burst >= 6:
             score += 18
             reasons.append(f"{burst:.0f}x spike in trade frequency")
-            anomaly_hits += 1
+            anomaly_hits += 1; hit_burst = True
         elif burst >= 3:
             score += 10
             reasons.append(f"{burst:.0f}x spike in trade frequency")
-            anomaly_hits += 1
+            anomaly_hits += 1; hit_burst = True
 
-    # ── F) Short-dated urgency ─────────────────────────────────────────────────
+    # ── F) Short-dated urgency (re-weighted from win-rate data) ─────────────
+    # closes_24h: 54% win rate (best signal), bumped +15 → +20
+    # closes_3d:  47% win rate,              bumped +8  → +15
+    # closes_7d:  20% win rate (NEGATIVE!),  zeroed +4  → 0 (informational tag only)
     if hours_to_close is not None:
         if hours_to_close <= 0.167:        # ≤ 10 minutes — last-minute rush
             score += 30
@@ -101,13 +110,13 @@ def score_trade(
             score += 20
             reasons.append("Closes within 2 hours")
         elif hours_to_close <= 24:
-            score += 15
+            score += 20
             reasons.append("Closes within 24 hours")
         elif hours_to_close <= 72:
-            score += 8
+            score += 15
             reasons.append("Closes within 3 days")
         elif hours_to_close <= 168:
-            score += 4
+            # 7-day window historically loses — no score, but keep the flag
             reasons.append("Closes within 7 days")
 
     # ── G) Absolute volume gate ────────────────────────────────────────────────
@@ -133,12 +142,14 @@ def score_trade(
         best_delta   = abs(pd60)
         delta_window = "60m"
 
+    # Backtest: price_delta won 41.8% (n=91) — one of the strongest signals.
+    # Bumped from +20/+14 to +28/+20 so real momentum drives more alerts.
     if best_delta >= 25:
-        score += 20
+        score += 28
         reasons.append(f"Price moved {best_delta:+d}¢ in {delta_window}")
         anomaly_hits += 1
     elif best_delta >= 15:
-        score += 14
+        score += 20
         reasons.append(f"Price moved {best_delta:+d}¢ in {delta_window}")
         anomaly_hits += 1
     elif best_delta >= 8:
@@ -191,6 +202,13 @@ def score_trade(
     # Require at least 2 anomaly signals (A–E) before any alert fires;
     # 3+ lifts the cap entirely. This prevents pure "big+short+conviction"
     # cold-start stacks from crossing the 50-point alert threshold.
+    #
+    # De-correlation fix: z-score (A) and burst (B) co-trigger on the SAME
+    # big trade ~70% of the time in the backtest. Counting them as 2 lets a
+    # single whale slip through the gate. Treat them as 1 hit.
+    if hit_size_shock and hit_burst:
+        anomaly_hits -= 1
+
     raw = min(score, 100)
     if anomaly_hits < 2:
         final = min(raw, 45)   # hard block — no alert
