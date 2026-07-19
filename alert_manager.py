@@ -13,8 +13,11 @@ logger = logging.getLogger("kalshi_monitor")
 # Markets in this category have produced 2% win rate / -90% ROI over the last 60d
 # (n=86 priced rows, n=197 of 460 resolved overall). Filter them out at the
 # alert-manager layer — same keyword set as auto_resolve._market_category.
+# Adjective forms (russian/iranian/israeli/ukrainian/chinese) added because the
+# word-boundary regex missed "Russian" and let 2 alerts leak through.
 GEOPOL_KEYWORDS = (
-    "iran", "russia", "ukraine", "israel", "china",
+    "iran", "iranian", "russia", "russian", "ukraine", "ukrainian",
+    "israel", "israeli", "china", "chinese",
     "hormuz", "hezbollah", "nato", "military", "war",
     "ceasefire", "airspace", "kharg", "blockade",
 )
@@ -23,6 +26,14 @@ _GEOPOL_RE = re.compile(r"\b(" + "|".join(GEOPOL_KEYWORDS) + r")\b", re.I)
 
 def _is_geopolitical(title: str) -> bool:
     return bool(_GEOPOL_RE.search(title or ""))
+
+
+# Daily "Up or Down" crypto/index direction markets. New-code cohort (n=69):
+# 39.1% win rate, -15.6% ROI — the ONLY losing category. These are inherent
+# ~50/50 coin-flips priced efficiently near 50¢; unusual flow carries no edge
+# on a one-day price direction. Dropping them lifts overall ROI +11% -> +27%.
+def _is_daily_direction(title: str) -> bool:
+    return "up or down" in (title or "").lower()
 
 
 CSV_FILE = "alerts_history.csv"
@@ -144,6 +155,12 @@ class AlertManager:
         if _is_geopolitical(title):
             logger.info(f"GEO-skip [solo]: {title[:60]}")
             self.market_last_alert[ticker] = now  # set cooldown so we don't retry
+            return
+
+        # Daily direction filter — 39% win rate, -16% ROI (only losing category).
+        if _is_daily_direction(title):
+            logger.info(f"DIRECTION-skip [solo]: {title[:60]}")
+            self.market_last_alert[ticker] = now
             return
 
         no_price = 100 - yes_price
