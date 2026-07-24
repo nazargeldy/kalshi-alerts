@@ -20,6 +20,8 @@ GEOPOL_KEYWORDS = (
     "israel", "israeli", "china", "chinese",
     "hormuz", "hezbollah", "nato", "military", "war",
     "ceasefire", "airspace", "kharg", "blockade",
+    "bab el-mandeb", "bab-el-mandeb", "mandeb", "strait", "gaza",
+    "houthi", "yemen", "taiwan", "north korea",
 )
 _GEOPOL_RE = re.compile(r"\b(" + "|".join(GEOPOL_KEYWORDS) + r")\b", re.I)
 
