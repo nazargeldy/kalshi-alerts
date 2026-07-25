@@ -39,6 +39,10 @@ def _is_daily_direction(title: str) -> bool:
 
 
 CSV_FILE = "alerts_history.csv"
+
+# Live paper-trading dashboard — appended to every alert so you can see how the
+# strategy is performing. Override with the PAPER_DASHBOARD_URL env var.
+DASHBOARD_URL = os.getenv("PAPER_DASHBOARD_URL", "https://nazargeldy.github.io/paper-trader/")
 CSV_HEADERS = [
     "Timestamp",   # when the alert fired
     "Source",      # Kalshi | Polymarket
@@ -168,9 +172,9 @@ class AlertManager:
                    timestamp_str=now_str)
 
     def _build_footer(self, ticker: str, link: str) -> str:
-        if _is_polymarket_ticker(ticker):
-            return f"🔗 <a href='{link}'>Trade on Polymarket</a>"
-        return f"🔗 <a href='{link}'>Trade on Kalshi</a>"
+        site = "Polymarket" if _is_polymarket_ticker(ticker) else "Kalshi"
+        return (f"🔗 <a href='{link}'>Trade on {site}</a>\n"
+                f"📊 <a href='{DASHBOARD_URL}'>Paper-trade dashboard</a>")
 
     def process_solo_alert(self, ticker: str, score: float, reasons: list, yes_price: int = 50, contracts: int = 0):
         if score < 80:
@@ -325,7 +329,9 @@ class AlertManager:
             f"\n"
             f"{market_lines}"
             f"\n"
-            f"⚡ Max Score: {max_score}/100"
+            f"⚡ Max Score: {max_score}/100\n"
+            f"\n"
+            f"📊 <a href='{DASHBOARD_URL}'>Paper-trade dashboard</a>"
         )
         print(f"🔥 CLUSTER [{source}] {cluster_key} count={count} max={max_score}")
 
