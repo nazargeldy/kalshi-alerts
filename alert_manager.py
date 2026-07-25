@@ -70,6 +70,28 @@ def _is_polymarket_ticker(ticker: str) -> bool:
     return ticker.startswith("0x") and len(ticker) > 20
 
 
+_EVENT_SLUG_RE = re.compile(r"polymarket\.com/event/([^/?#]+)")
+
+def _event_key(ticker: str, link: str) -> str:
+    """A key identifying the underlying EVENT (not the individual sub-market).
+    Price ladders ("...between $X and $Y") and date ladders ("...by <month>")
+    share one event, so we normalize the slug down to the shared stem: strip
+    the '-by'/'-on' framing, the 'ptptpt' suffix, and trailing date hashes."""
+    m = _EVENT_SLUG_RE.search(link or "")
+    if m:
+        slug = m.group(1).lower()
+        slug = re.sub(r"pt(pt)*.*$", "", slug)   # strip ...ptptpt-<capture hash>
+        slug = re.sub(r"-\d{6,}$", "", slug)      # strip any remaining long hash
+        slug = re.sub(r"-(by|on)$", "", slug)     # Claude "released-by"/"-on" -> same
+        slug = re.sub(r"-\d{4}$", "", slug)       # strip trailing year (-2026)
+        slug = slug.strip("-")
+        # NOTE: readable dates (e.g. "-july-22") are kept, so different DAYS stay
+        # distinct; only same-event sub-market ladders and by/on variants merge.
+        if slug:
+            return "POLY:" + slug
+    return "T:" + (ticker or "")[:24]
+
+
 class AlertManager:
     def __init__(self, alerter, daily_cap=20, ticker_map=None, link_map=None, option_labels_map=None):
         self.alerter = alerter
@@ -82,9 +104,16 @@ class AlertManager:
 
         self.market_last_alert = defaultdict(float)
         self.cluster_last_alert = defaultdict(float)
+        # Event-level tracking: many sub-markets (price ladders, date ladders)
+        # share one underlying event. Track the last alert time + side per event
+        # to stop over-trading the same event and flip-flopping sides on it.
+        self.event_last_alert = defaultdict(float)   # event_key -> ts
+        self.event_last_side  = {}                   # event_key -> "YES"|"NO"
 
-        self.MARKET_COOLDOWN = 3600  # 1 hour per market
-        self.CLUSTER_COOLDOWN = 1800 # 30 min per cluster
+        self.MARKET_COOLDOWN = 3600     # 1 hour per market (sub-market)
+        self.CLUSTER_COOLDOWN = 1800    # 30 min per cluster
+        self.EVENT_COOLDOWN = 4 * 3600  # 4 hours per underlying event (dedup)
+        self.SIDE_FLIP_WINDOW = 24 * 3600  # never alert opposite side within 24h
 
     def _maybe_reset_daily_cap(self):
         today = datetime.date.today()
@@ -170,6 +199,17 @@ class AlertManager:
         yes_label, no_label = self.option_labels_map.get(ticker, ("✅ Yes", "❌ No"))
         source   = "Polymarket" if _is_polymarket_ticker(ticker) else "Kalshi"
 
+        # ── Event-level dedup ────────────────────────────────────────────────
+        # Many sub-markets (price ladders, date ladders) share one underlying
+        # event. Don't re-alert the same event within EVENT_COOLDOWN — this
+        # stops the observed 61x-per-event over-trading. Checked before the AI
+        # call to also save Groq cost.
+        event_key = _event_key(ticker, link)
+        if now - self.event_last_alert[event_key] < self.EVENT_COOLDOWN:
+            logger.info(f"EVENT-dedup skip: {title[:55]} [{event_key}]")
+            self.market_last_alert[ticker] = now
+            return
+
         reason_lines = "".join(f"  • {r}\n" for r in reasons)
         analysis = analyze_trade(title, yes_label, no_label, yes_price, contracts, score, reasons, num_trades=1) or ""
 
@@ -190,6 +230,18 @@ class AlertManager:
         else:
             # Heuristic: if price moved up (positive delta implied by high price), follow momentum
             side = yes_label if yes_price <= 50 else no_label
+
+        # ── No side-flipping on the same event ───────────────────────────────
+        # If we already alerted this event with the opposite side inside the
+        # flip window, suppress — betting both directions on one event is the
+        # whipsaw that lost money (e.g. Claude Opus NO then YES same day).
+        this_dir = "YES" if side == yes_label else "NO"
+        last_dir = self.event_last_side.get(event_key)
+        if (last_dir and last_dir != this_dir
+                and now - self.event_last_alert[event_key] < self.SIDE_FLIP_WINDOW):
+            logger.info(f"SIDE-FLIP skip: {title[:50]} was {last_dir}, now {this_dir}")
+            self.market_last_alert[ticker] = now
+            return
 
         # ── Cheap-YES guardrail ──────────────────────────────────────────────
         # Last 60d: YES bets at any price won 20.9% (n=401); the cheapest YES
@@ -233,6 +285,9 @@ class AlertManager:
         if success:
             self._log(ticker, title, source, side, score, reasons, link, analysis,
                       entry_price=yes_price, contracts=contracts)
+            # Record event so we dedup / block side-flips on it going forward.
+            self.event_last_alert[event_key] = now
+            self.event_last_side[event_key] = this_dir
 
         self.market_last_alert[ticker] = now
 
